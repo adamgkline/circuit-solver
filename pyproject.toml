@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "circuit_solver"
+version = "1.0"
+description = "Model analog resistive circuits and their training by contrastive methods"
+authors = [
+    {name = "Adam Kline", email = "agkline@sas.upenn.edu"}
+]
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    "numpy",
+    "networkx",
+    "matplotlib",
+    "scipy",
+    "pandas",
+    "scikit-image",
+    "torch",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["jupyter"]
+
+[project.urls]
+Homepage = "https://github.com/adamgkline/circuit-solver"

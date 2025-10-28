@@ -1,0 +1,9 @@
+numpy
+networkx
+matplotlib
+scipy
+jupyter
+pandas
+scikit-image
+torch
+tqdm
