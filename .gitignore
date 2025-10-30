@@ -4,3 +4,4 @@ venv
 build
 .DS_Store
 requirements_verbose.txt
+dev

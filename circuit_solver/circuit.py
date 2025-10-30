@@ -90,16 +90,41 @@ class Circuit(nx.Graph):
     def __init__(self, graph, element_dict):
         """
         Initialize a Circuit from a graph and element dictionary.
-        
+
         Args:
             graph (nx.Graph): NetworkX graph defining circuit topology
             element_dict (dict): Maps circuit elements to edge lists
         """
         # Initialize as a NetworkX graph by copying the input graph
         super(Circuit, self).__init__(graph)
-        
+
         self.element_dict = element_dict
         self.elements = list(element_dict.keys())
+
+        # Check for duplicate element names and make them unique
+        element_names = [element.name for element in self.elements]
+        if len(element_names) != len(set(element_names)):
+            import warnings
+
+            # Create unique names
+            name_counts = {}
+            renamed_elements = []
+
+            for element in self.elements:
+                base_name = element.name
+                if base_name not in name_counts:
+                    name_counts[base_name] = 0
+                else:
+                    name_counts[base_name] += 1
+                    # Modify the element's name to make it unique
+                    element.name = f"{base_name}_{name_counts[base_name]}"
+                    renamed_elements.append((base_name, element.name))
+
+            # Print warning with renamed elements
+            warning_msg = "\nDuplicate element names found. Renamed elements:\n"
+            for old_name, new_name in renamed_elements:
+                warning_msg += f"  {old_name} -> {new_name}\n"
+            warnings.warn(warning_msg, UserWarning)
 
         self.DelT = nx.incidence_matrix(self, oriented=True)
         self.Del = self.DelT.T
@@ -110,7 +135,7 @@ class Circuit(nx.Graph):
             # Create a dictionary mapping each edge to its element
             edge_attrs = {edge: {'element': element} for edge in edges}
             nx.set_edge_attributes(self, edge_attrs)
-    
+
 
 class CircuitModel(nn.Module):
     """

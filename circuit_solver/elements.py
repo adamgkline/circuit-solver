@@ -100,30 +100,33 @@ def reverse_element(resistive_element):
         init_mode=resistive_element.init_mode,
         init_params=resistive_element.init_params)
 
+def element_generator(*args, **kwargs):
+    """
+    Factory function that returns a callable generator for creating ResistiveElement instances.
+
+    Returns a callable that creates ResistiveElement instances, allowing override of any parameter.
+    """
+    def generator(**override_kwargs):
+        # Merge default kwargs with overrides (overrides take precedence)
+        final_kwargs = {**kwargs, **override_kwargs}
+        return ResistiveElement(*args, **final_kwargs)
+    return generator
+
 
 # Asymmetric resistive elements
-Diode = ResistiveElement(rho_diode, N_params=2, name='Diode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1)])  # [conductance, steepness]
-DiodeRev = reverse_element(Diode)
+Diode = element_generator(rho_diode, N_params=2, name='Diode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1)])  # [conductance, steepness]
 
-AdjDiode = ResistiveElement(rho_adj_diode, N_params=3, name='AdjDiode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1), (-1,1)]) # [conductance, steepness, offset]
-AdjDiodeRev = reverse_element(AdjDiode)
+AdjDiode = element_generator(rho_adj_diode, N_params=3, name='AdjDiode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1), (-1,1)]) # [conductance, steepness, offset]
 
-IdealDiode = ResistiveElement(rho_ideal_diode, N_params=1, name='IdealDiode',param_ranges=[(1E-1, 1E1)])  # [conductance]
-IdealDiodeRev = reverse_element(IdealDiode)
+IdealDiode = element_generator(rho_ideal_diode, N_params=1, name='IdealDiode',param_ranges=[(1E-1, 1E1)])  # [conductance]
 
-AdjIdealDiode = ResistiveElement(rho_adj_ideal_diode, N_params=2, name='AdjIdealDiode', param_ranges=[(1E-1,1E1,-1,1)])
-AdjIdealDiodeRev = reverse_element(AdjIdealDiode)
+AdjIdealDiode = element_generator(rho_adj_ideal_diode, N_params=2, name='AdjIdealDiode', param_ranges=[(1E-1,1E1,-1,1)]) # [conductance, offset]
 
-# DiodeRev = ResistiveElement(reverse(rho_diode), N_params=2, name='DiodeRev', param_ranges=[(1E-1, 1E1), (1E-1, 1E1)])
-# IdealDiodeRev = ResistiveElement(reverse(rho_ideal_diode), N_params=1, name='IdealDiodeRev',param_ranges=[(1E-1, 1E1)])
-AdjDiodeRev = ResistiveElement(reverse(rho_adj_diode), N_params=3, name='AdjDiodeRev', param_ranges=[(1E-1, 1E1), (1E-1, 1E1), (-1,1)])
-# AdjIdealDiodeRev = ResistiveElement(reverse(rho_adj_ideal_diode), N_params=2, name='AdjIdealDiodeRev', param_ranges=[(1E-1,1E1,-1,1)])
 
 # Symmetric resistive elements  
-DiodeSym = ResistiveElement(rho_diode_sym, N_params=2, name='DiodeSym',
-                           param_ranges=[(1E-2, 1E2), (1E-1, 1E1)])
-IdealDiodeSym = ResistiveElement(rho_ideal_diode_sym, N_params=2, name='IdealDiodeSym',
-                                param_ranges=[(1E-2, 1E2), (1E-2, 1E2)])
-Resistor = ResistiveElement(rho_linear, N_params=1, name='Resistor',
-                           param_ranges=[(1E-2, 1E2)])  # [conductance]
+DiodeSym = element_generator(rho_diode_sym, N_params=2, name='DiodeSym', param_ranges=[(1E-2, 1E2), (1E-1, 1E1)])
+IdealDiodeSym = element_generator(rho_ideal_diode_sym, N_params=2, name='IdealDiodeSym', param_ranges=[(1E-2, 1E2), (1E-2, 1E2)])
+Resistor = element_generator(rho_linear, N_params=1, name='Resistor', param_ranges=[(1E-2, 1E2)])  # [conductance]
+
+
 
