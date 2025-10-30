@@ -1,7 +1,7 @@
 import numpy as np
 import torch as tc
 import networkx as nx
-import circuit_solver.utils
+from circuit_solver import utils
 from dataclasses import dataclass
 from torch import nn
 from torch.nn.parameter import Parameter
