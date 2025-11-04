@@ -175,8 +175,8 @@ def CoupledLearning(X, Y, model, config=None, **params):
         # record performance on batch
         loss_batch = loss_function(y, y_F) / cfg.batch_size
         accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
-        loss[t] = loss_batch
-        accuracy[t] = accuracy_batch
+        loss[t] = loss_batch.detach()
+        accuracy[t] = accuracy_batch.detach()
 
     for k, v in param_history.items():
         param_history[k] = np.stack(v, axis=1)      # so that history[theta][i] is the history of theta_i, with shape (N_batch, N_edges)

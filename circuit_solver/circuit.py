@@ -98,8 +98,17 @@ class Circuit(nx.Graph):
         # Initialize as a NetworkX graph by copying the input graph
         super(Circuit, self).__init__(graph)
 
-        self.element_dict = element_dict
-        self.elements = list(element_dict.keys())
+        # Sort edge lists in element_dict to match the adjacency matrix ordering
+        # This ensures consistency between element_dict and the incidence matrix
+        sorted_element_dict = {}
+        for element, edges in element_dict.items():
+            # Sort edges to match the order that will be used by nx.incidence_matrix
+            # NetworkX orders edges lexicographically (by node indices)
+            sorted_edges = sorted(edges, key=lambda edge: (min(edge), max(edge)))
+            sorted_element_dict[element] = sorted_edges
+
+        self.element_dict = sorted_element_dict
+        self.elements = list(sorted_element_dict.keys())
 
         # Check for duplicate element names and make them unique
         element_names = [element.name for element in self.elements]
