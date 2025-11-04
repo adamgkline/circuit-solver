@@ -8,10 +8,11 @@ class ResistiveElement(object):
     Make sure that cocontent function rho is defined with torch functions.
 
     """
-    def __init__(self, rho, N_params, name, param_ranges=None, init_mode='geometric_mean', init_params=None):
+    def __init__(self, rho, N_params, name, type=None, param_ranges=None, init_mode='geometric_mean', init_params=None):
         self.rho = rho
         self.N_params = N_params
         self.name = name
+        self.type = type
         # param_ranges: list of (min, max) tuples, one for each parameter
         # None values mean no constraint for that bound
         self.param_ranges = param_ranges or [(None, None)] * N_params
@@ -46,7 +47,7 @@ class ResistiveElement(object):
         func = lambda x : self.gamma(x, theta)
         return tc.func.grad(func)(x)
 
-    def d_theta_d_rho(self, x, theta):
+    def d_rho_d_theta(self, x, theta):
         func = lambda theta : self.rho(x, theta)
         return tc.func.grad(func)(theta)
 
@@ -57,6 +58,9 @@ def rho_diode(x, theta):
 
 def rho_adj_diode(x, theta):
     return rho_diode(x - theta[2], theta[:2])
+
+def rho_adj_diode_II(x, theta):
+    return theta[0] / theta[1] * (tc.exp(theta[1] * x - theta[2]) - theta[1] * x + theta[2] - 1)
 
 def rho_ideal_diode(x, theta):
     # return theta[0] / 2 * ReLU(x) * x
@@ -76,6 +80,9 @@ def rho_adj_ideal_diode(x, theta):
 
 
 
+
+
+
 # Reverse-direction components
 # Use a callable class instead of lambda so it can be pickled
 class ReversedFunction:
@@ -91,7 +98,7 @@ def reverse(func):
     return ReversedFunction(func)
 
 def reverse_element(resistive_element):
-    name = resistive_element.name + 'Rev'
+    name = resistive_element.name
     rho = reverse(resistive_element.rho)
     return ResistiveElement(rho,
         N_params=resistive_element.N_params,
@@ -114,19 +121,22 @@ def element_generator(*args, **kwargs):
 
 
 # Asymmetric resistive elements
-Diode = element_generator(rho_diode, N_params=2, name='Diode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1)])  # [conductance, steepness]
+Diode = element_generator(rho_diode, N_params=2, name='Diode', type='Diode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1)])  # [conductance, steepness]
 
-AdjDiode = element_generator(rho_adj_diode, N_params=3, name='AdjDiode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1), (-1,1)]) # [conductance, steepness, offset]
+AdjDiode = element_generator(rho_adj_diode, N_params=3, name='AdjDiode', type='AdjDiode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1), (-1,1)]) # [conductance, steepness, offset]
 
-IdealDiode = element_generator(rho_ideal_diode, N_params=1, name='IdealDiode',param_ranges=[(1E-1, 1E1)])  # [conductance]
+AdjDiodeII = element_generator(rho_adj_diode_II, N_params=3, name='AdjDiode', type='AdjDiode', param_ranges=[(1E-1, 1E1), (1E-1, 1E1), (-1,1)])
 
-AdjIdealDiode = element_generator(rho_adj_ideal_diode, N_params=2, name='AdjIdealDiode', param_ranges=[(1E-1,1E1,-1,1)]) # [conductance, offset]
+IdealDiode = element_generator(rho_ideal_diode, N_params=1, name='IdealDiode',type='IdealDiode', param_ranges=[(1E-1, 1E1)])  # [conductance]
+
+AdjIdealDiode = element_generator(rho_adj_ideal_diode, N_params=2, name='AdjIdealDiode', type='AdjIdealDiode', param_ranges=[(1E-1,1E1,-1,1)]) # [conductance, offset]
+
 
 
 # Symmetric resistive elements  
-DiodeSym = element_generator(rho_diode_sym, N_params=2, name='DiodeSym', param_ranges=[(1E-2, 1E2), (1E-1, 1E1)])
-IdealDiodeSym = element_generator(rho_ideal_diode_sym, N_params=2, name='IdealDiodeSym', param_ranges=[(1E-2, 1E2), (1E-2, 1E2)])
-Resistor = element_generator(rho_linear, N_params=1, name='Resistor', param_ranges=[(1E-2, 1E2)])  # [conductance]
+DiodeSym = element_generator(rho_diode_sym, N_params=2, name='DiodeSym', type='DiodeSym', param_ranges=[(1E-2, 1E2), (1E-1, 1E1)])
+IdealDiodeSym = element_generator(rho_ideal_diode_sym, N_params=2, name='IdealDiodeSym', type='IdealDiodeSym', param_ranges=[(1E-2, 1E2), (1E-2, 1E2)])
+Resistor = element_generator(rho_linear, N_params=1, name='Resistor', type='Resistor', param_ranges=[(1E-2, 1E2)])  # [conductance]
 
 
 

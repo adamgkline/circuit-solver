@@ -1,6 +1,7 @@
 import numpy as np
 import torch as tc
 import random
+import warnings
 from tqdm import tqdm
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
@@ -11,9 +12,24 @@ class CLTrainingConfig:
     x_inds: int = 'x'
     y_inds: int = 'y'
     batch_size: int = 100
-    N_epochs: int = 1
+    N_epochs: Optional[int] = None
+    N_batches: Optional[int] = None
     eta: float = 0.5
     alpha: float = 1.0
+
+    def __post_init__(self):
+        """Validate that either N_epochs or N_batches is provided, but warn if both are given"""
+        if self.N_epochs is None and self.N_batches is None:
+            # Default to N_epochs = 1 if neither is provided
+            self.N_epochs = 1
+        elif self.N_epochs is not None and self.N_batches is not None:
+            # Both provided - warn and use N_batches
+            warnings.warn(
+                f"Both N_epochs ({self.N_epochs}) and N_batches ({self.N_batches}) were provided. "
+                f"Using N_batches = {self.N_batches}.",
+                UserWarning
+            )
+            self.N_epochs = None  # Clear N_epochs to avoid confusion
 
 @dataclass
 class CLTestingConfig:
@@ -21,9 +37,22 @@ class CLTestingConfig:
     x_inds: str = 'x'
     y_inds: str = 'y'
     batch_size: int = 100
-    # N_batches: Optional[int] = None
-    N_epochs: int = 1
+    N_epochs: Optional[int] = None
+    N_batches: Optional[int] = None
 
+    def __post_init__(self):
+        """Validate that either N_epochs or N_batches is provided, but warn if both are given"""
+        if self.N_epochs is None and self.N_batches is None:
+            # Default to N_epochs = 1 if neither is provided
+            self.N_epochs = 1
+        elif self.N_epochs is not None and self.N_batches is not None:
+            # Both provided - warn and use N_batches
+            warnings.warn(
+                f"Both N_epochs ({self.N_epochs}) and N_batches ({self.N_batches}) were provided. "
+                f"Using N_batches = {self.N_batches}.",
+                UserWarning
+            )
+            self.N_epochs = None  # Clear N_epochs to avoid confusion
 
 
 
@@ -61,8 +90,13 @@ def CoupledLearning(X, Y, model, config=None, **params):
 
     N_edges = model.circuit.number_of_edges()
     batches_per_epoch = P // cfg.batch_size
-    N_epochs = cfg.N_epochs
-    N_batches = int(batches_per_epoch * N_epochs)
+
+    # Calculate N_batches based on which parameter was provided
+    if cfg.N_batches is not None:
+        N_batches = cfg.N_batches
+    else:
+        # cfg.N_epochs is guaranteed to be set by __post_init__
+        N_batches = int(batches_per_epoch * cfg.N_epochs)
 
     # change inputs to indices if default strings are passed in
     x_inds, y_inds = cfg.x_inds, cfg.y_inds
@@ -113,7 +147,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
         model.set_inputs(x_inds)
         V_node_F, _ = model(x)
         y_F = V_node_F[:, y_inds]
-        V_edge_F = model.V_edge()
+        V_edge_F = model.V_edge() 
 
         # Compute clamped state
         y_C = cfg.eta * y + (1 - cfg.eta) * y_F
@@ -129,6 +163,9 @@ def CoupledLearning(X, Y, model, config=None, **params):
             V_C = V_edge_C[:, edge_inds]
 
             # apply parameter gradients
+            # theta = layer.theta.data
+            # d_theta = compute_d_theta(V_F, V_C, layer)
+            # layer.update_parameters(theta + d_theta)
             layer.theta.data += compute_d_theta(V_F, V_C, layer)
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
@@ -195,14 +232,14 @@ def TestClassificationAccuracy(X, Y, model, config=None, **params):
 
     # For testing, we don't have time-varying parameters like in the old version
     T = 1
-    
-    # Calculate number of batches
+
+    # Calculate number of batches based on which parameter was provided
     batches_per_epoch = P // cfg.batch_size
-    N_epochs = cfg.N_epochs
-    N_batches = int(batches_per_epoch * N_epochs)
-    # N_batches = cfg.N_batches if cfg.N_batches is not None else P // cfg.batch_size
-    # if N_batches == 0:
-        # N_batches = 1
+    if cfg.N_batches is not None:
+        N_batches = cfg.N_batches
+    else:
+        # cfg.N_epochs is guaranteed to be set by __post_init__
+        N_batches = int(batches_per_epoch * cfg.N_epochs)
 
     # Initialize arrays
     accuracy = np.zeros(N_batches)

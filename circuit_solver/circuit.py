@@ -669,7 +669,7 @@ class CircuitModel(nn.Module):
         Returns:
             torch.Tensor: Edge voltages with shape (batch_size, n_edges)
         """
-        # Convert einsum 'ab, cb -> ca' to matrix multiplication: Del^T @ V
+        # Convert einsum 'ab, cb -> ca' to matrix multiplication: Del @ V
         V_clamped_edge = - self.mm_func(self.V_clamped, self.Del_clamped.t())
         V_free_edge = - self.mm_func(self.V_free, self.Del_free.t())
         return V_clamped_edge + V_free_edge
@@ -1016,87 +1016,5 @@ class ElementLayer(nn.Module):
         Returns:
             torch.Tensor: Cocontent gradient with shape (batch_size, N_params, N_edges)
         """
-        return self.vectorize(self.element.d_theta_d_rho)(x, self.theta)
+        return self.vectorize(self.element.d_rho_d_theta)(x, self.theta)
 
-
-
-
-
-
-
-# @dataclass
-# class CrossbarConfig:
-#     eta: float = 1.             # nudging factor
-#     alpha: float = 0.01         # learning rate
-#     k_min: float = 0.1         # minimium conductance
-#     k_max: float = 10.          # maximum conductance
-
-
-# class CrossbarArray(object):
-    
-#     def __init__(self, N, M, config=None):
-#         self.M = M
-#         self.N = N
-#         self.shape = (N, M)
-
-#         # Get configuration
-#         if config is not None:
-#             if isinstance(config, CrossbarConfig):
-#                 cfg = config
-#             else:
-#                 raise TypeError("config must be a CrossbarConfig object")
-#         else:
-#             cfg = CrossbarConfig()
-#         self.eta = cfg.eta
-#         self.alpha = cfg.alpha
-#         self.k_min = cfg.k_min
-#         self.k_max = cfg.k_max
-
-        
-#     def dk_dt(self, k, Mxx, Myx, Myy, backend=np, clip=True):
-#         N, M = self.shape
-#         eta, alpha = self.eta, self.alpha
-
-#         if clip:
-#             k = self.clip(k, backend=backend)
-        
-#         C = self.C(k, backend=backend)
-
-#         # Only contributions from xx and yx correlations are affected by conductance state
-#         QxxMxx =    (1 - (1 - eta)**2) * backend.einsum('bc,bd,cd->b', C, C, Mxx)[:,None] \
-#                     - 2 * backend.einsum('bc,ca->ba', C, Mxx)
-#         QyxMyx =    - 2 * eta * (1 - eta) * backend.einsum('bc,bc->b', C, Myx)[:,None] \
-#                     + 2 * eta * Myx
-#         dk_ba = alpha / eta * (QxxMxx + QyxMyx - eta**2 * backend.diag(Myy)[:,None]) # node, node index
-        
-#         dk_out = dk_ba.reshape(M * N)
-#         if clip:
-#             # Project update back into feasible set
-#             k_would_be = k + dk_out # edge indexed
-#             k_should_be = self.clip(k_would_be, backend=backend)
-#             dk_out = k_should_be - k
-        
-#         return dk_out
-
-#     def C(self, k, backend=np):
-#         N, M = self.shape
-#         A = k.reshape((M, N))
-#         A_norm = backend.sum(A, axis=1)
-#         C = ((A_norm)**(-1))[:,None] * A
-#         return C
-
-#     def f(self, x, k, backend=np):
-#         ""
-#         C = self.C(k, backend=backend)
-#         return x @ C.T
-
-#     def clip(self, k, backend=np):
-#         return backend.clip(k, self.k_min, self.k_max)
-
-#     def A_to_k(self, A):
-#         N, M = self.shape
-#         return np.reshape(A, (N*M,))
-
-#     def k_to_A(self, k):
-#         N, M = self.shape
-#         return np.reshape(k, (M, N))
