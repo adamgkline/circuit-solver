@@ -130,7 +130,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
         grad_rho_F = layer.d_rho_d_theta(V_F)
         grad_rho_C = layer.d_rho_d_theta(V_C)
         return layer.trainable * cfg.alpha / cfg.eta * tc.mean((grad_rho_F - grad_rho_C), axis=0)
-        # return layer.trainable * cfg.alpha / cfg.eta * tc.mean((V_F**2 - V_C**2), axis=0)
+        # return layer.trainable * cfg.alpha / cfg.eta / 2 * tc.mean((V_F**2 - V_C**2), axis=0)
         
     # Training loop
     for t in tqdm(range(N_batches)):
@@ -150,10 +150,10 @@ def CoupledLearning(X, Y, model, config=None, **params):
         V_edge_F = model.V_edge() 
 
         # Compute clamped state
-        y_C = cfg.eta * y + (1 - cfg.eta) * y_F
+        y_C = cfg.eta * y + (1 - cfg.eta) * y_F.detach()
 
         model.set_inputs(x_inds, y_inds)
-        _ = model(x, y)
+        _ = model(x, y_C)
         V_edge_C = model.V_edge()
         
         # update parameters and history
