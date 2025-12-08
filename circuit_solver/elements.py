@@ -43,9 +43,15 @@ class ResistiveElement(object):
         func = lambda x : self.rho(x, theta)
         return tc.func.grad(func)(x)
 
-    def d_gamma(self, x, theta):
+    def d_gamma_d_x(self, x, theta):
         func = lambda x : self.gamma(x, theta)
         return tc.func.grad(func)(x)
+
+    def d_gamma_d_theta(self, x, theta):
+        # func = lambda x : self.d_rho_d_theta(x, theta)
+        # return tc.func.grad(func)(x)
+        func = lambda theta : self.gamma(x, theta)
+        return tc.func.grad(func)(theta)
 
     def d_rho_d_theta(self, x, theta):
         func = lambda theta : self.rho(x, theta)

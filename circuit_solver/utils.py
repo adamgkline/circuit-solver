@@ -14,6 +14,27 @@ import os
 ######################################## GRAPHICS UTILITIES ########################################
 
 
+def alpha_n(n, min_alpha=0.001, max_alpha=1.0):
+    """
+    Calculate optimal alpha transparency for scatter plots based on number of points.
+
+    Uses square root scaling to account for quadratic density effects from overlapping
+    points, ensuring good visual density without oversaturation.
+
+    Args:
+        n: Number of points in the scatter plot
+        min_alpha: Minimum alpha value (default: 0.02) - prevents points from being invisible
+        max_alpha: Maximum alpha value (default: 1.0) - cap for small datasets
+
+    Returns:
+        float: Alpha value between min_alpha and max_alpha
+
+    Example:
+        plt.scatter(x, y, alpha=scatter_alpha(len(x)))
+
+    """
+    alpha = 2 / np.sqrt(n)
+    return np.clip(alpha, min_alpha, max_alpha)
 
 
 ######################################## EXPERIMENT INDEX MANAGEMENT ########################################
@@ -341,7 +362,7 @@ def preprocess_MNIST_data_legacy(X_in, size):
     
     return X
 
-def preprocess_MNIST_data(X_in, Y_in, size, X_gain=1., Y_gain=1.):
+def preprocess_MNIST_data(X_in, Y_in, size, X_gain=1., Y_gain=1., add_negatives=True):
     # downsample inputs
     X = downsample_images(X_in, size)
 
@@ -349,7 +370,8 @@ def preprocess_MNIST_data(X_in, Y_in, size, X_gain=1., Y_gain=1.):
     Y = index_to_one_hot(Y_in)
 
     # Add negative entries
-    X = np.concatenate((X, -X), axis=1)
+    if add_negatives:
+        X = np.concatenate((X, -X), axis=1)
     # Y = np.concatenate((Y, -Y), axis=1)
     
     # Normalize

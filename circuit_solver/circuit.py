@@ -1,4 +1,6 @@
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib as mpl
 import torch as tc
 import networkx as nx
 from circuit_solver import utils
@@ -87,6 +89,24 @@ class Circuit(nx.Graph):
         >>> circuit = Circuit(graph, element_dict)
     """
 
+    def __new__(cls, graph, element_dict):
+        """
+        Create a new Circuit instance.
+
+        This method is needed because we inherit from nx.Graph, and we need to
+        ensure the parent __new__ is called without the extra arguments that
+        our __init__ requires.
+
+        Args:
+            cls: The Circuit class
+            graph: NetworkX graph (not used in __new__, only in __init__)
+            element_dict: Dictionary mapping elements to edges (not used in __new__)
+
+        Returns:
+            A new Circuit instance
+        """
+        return super().__new__(cls)
+
     def __init__(self, graph, element_dict):
         """
         Initialize a Circuit from a graph and element dictionary.
@@ -171,8 +191,9 @@ class CircuitModel(nn.Module):
         node_type_dict (dict): Node type mappings
         element_layers (dict): Shared ElementLayer instances by element name
         rho (nn.Sequential): Cocontent function module
-        gamma (nn.Sequential): Conductance function module  
-        d_gamma (nn.Sequential): Conductance derivative module
+        gamma (nn.Sequential): Current function module  
+        d_gamma_d_x (nn.Sequential): Current voltage derivative module
+        d_gamma_d_theta (nn.Sequential): Current parameter derivative module
         clamped_inds (list): Indices of voltage-clamped nodes
         free_inds (list): Indices of nodes with free voltages
         V_clamped (torch.Tensor): Voltages of clamped nodes (batch_size, n_clamped)
@@ -247,7 +268,7 @@ class CircuitModel(nn.Module):
         # Then create modules that use these shared layers
         self._create_rho_module()
         self._create_gamma_module()
-        self._create_d_gamma_module()
+        self._create_d_gamma_d_x_module()
 
         # set device
         self.device = tc.accelerator.current_accelerator().type if tc.accelerator.is_available() and cfg.use_gpu else "cpu"   # "mps" for mac, typically "cuda" elsewhere
@@ -307,7 +328,7 @@ class CircuitModel(nn.Module):
 
     def _create_element_layers(self):
         """
-        Create shared ElementLayer instances that will be reused across rho, gamma, d_gamma, and d_rho_d_gamma modules
+        Create shared ElementLayer instances that will be reused across rho, gamma, d_gamma_d_x, d_gamma_d_theta, and d_rho_d_gamma modules
         """
         self.element_layers = {}
         self.element_to_edge_inds = {}
@@ -317,12 +338,17 @@ class CircuitModel(nn.Module):
             edge_inds = utils.edges_to_inds(edges, self.circuit)
             
             # Create one ElementLayer instance per element type
-            element_layer = ElementLayer(element, edges=edges)
-            
+            # element_layer = ElementLayer(element, edges=edges)
+            N_edges = len(edges)
+            element_layer = ElementLayer(element, N_edges)
+            element_layer.edges = edges
+            element_layer.edge_inds = edge_inds
+
             # Store the shared layer and its edge indices
             self.element_layers[element.name] = element_layer
             self.element_to_edge_inds[element.name] = edge_inds
             
+
             # Register as a named module for parameter tracking
             self.add_module(f"{element.name}_layer", element_layer)
 
@@ -397,9 +423,9 @@ class CircuitModel(nn.Module):
             
         self.gamma = nn.Sequential(*masked_gamma_nonlinearities)
 
-    def _create_d_gamma_module(self):
+    def _create_d_gamma_d_x_module(self):
         """
-        Create the d_gamma (differential conductance) module using shared ElementLayer instances.
+        Create the d_gamma_d_x (differential conductance) module using shared ElementLayer instances.
         
         This module computes derivatives of current-voltage relations for all circuit elements,
         applying the appropriate function to each edge based on its element type.
@@ -407,19 +433,19 @@ class CircuitModel(nn.Module):
         # Use shared ElementLayer instances
         N_edges = self.circuit.number_of_edges()
         
-        masked_d_gamma_nonlinearities = []
+        masked_d_gamma_d_x_nonlinearities = []
         for element_name, element_layer in self.element_layers.items():
             edge_indices = self.element_to_edge_inds[element_name]
             
-            # Wrap shared layer's d_gamma method in MaskedNonlinearity
-            masked_d_gamma = MaskedNonlinearity(
-                nonlinearity=element_layer.d_gamma,
+            # Wrap shared layer's d_gamma_d_x method in MaskedNonlinearity
+            masked_d_gamma_d_x = MaskedNonlinearity(
+                nonlinearity=element_layer.d_gamma_d_x,
                 indices=edge_indices,
                 total_dim=N_edges
             )
-            masked_d_gamma_nonlinearities.append(masked_d_gamma)
+            masked_d_gamma_d_x_nonlinearities.append(masked_d_gamma_d_x)
             
-        self.d_gamma = nn.Sequential(*masked_d_gamma_nonlinearities)
+        self.d_gamma_d_x = nn.Sequential(*masked_d_gamma_d_x_nonlinearities)
 
     def set_physical_objective(self, mode):
         """
@@ -619,7 +645,6 @@ class CircuitModel(nn.Module):
 
         # get optimizer based on configuration
         if self.optimizer_type.lower() == 'lbfgs':
-            # self.optim_lr = 1.          # best configuration based on tests on 25.0
             optimizer = tc.optim.LBFGS([self.V_free], lr=self.optim_lr)
         elif self.optimizer_type.lower() == 'adam':
             optimizer = tc.optim.Adam([self.V_free], lr=self.optim_lr)
@@ -736,6 +761,16 @@ class CircuitModel(nn.Module):
         # return tc.sum(self.I_node()**2, axis=1)
         return tc.mean(self.I_node()**2)
 
+    def plot_layer_state(self, layer_name, ax=None, figsize=[12,8], include_lines=False, **kwargs):
+        layer = self.element_layers[layer_name]
+        edge_inds = self.element_to_edge_inds[layer_name]
+        V_edge = self.V_edge()[:,edge_inds]
+        V_np = V_edge.detach().numpy()
+        V_lims = np.min(V_np), np.max(V_np)
+        if include_lines:
+            fig, ax = layer.plot_gamma_curves(*V_lims, ax=ax, figsize=figsize, **kwargs)
+        return layer.plot_gamma_values(V_edge, ax=ax, figsize=figsize, **kwargs)
+
 
 class MaskedNonlinearity(nn.Module):
     """
@@ -798,7 +833,7 @@ class ElementLayer(nn.Module):
     This layer manages learnable parameters for all edges containing the same
     element type (e.g., all diodes, all resistors). It provides vectorized
     computation of cocontent functions (rho), conductance functions (gamma),
-    and conductance derivatives (d_gamma).
+    and conductance derivatives (d_gamma_d_x).
     
     The layer automatically enforces parameter constraints defined in the
     element's param_ranges attribute.
@@ -821,9 +856,9 @@ class ElementLayer(nn.Module):
         >>> x = torch.randn(batch_size, len(edges))
         >>> cocontent = layer.rho(x)
         >>> conductance = layer.gamma(x)
-        >>> d_conductance = layer.d_gamma(x)
+        >>> d_conductance = layer.d_gamma_d_x(x)
     """
-    def __init__(self, element, edges, trainable=True):
+    def __init__(self, element, N_edges, trainable=True):
         """
         Initialize an ElementLayer for a specific circuit element type.
 
@@ -835,9 +870,10 @@ class ElementLayer(nn.Module):
 
         super(ElementLayer, self).__init__()
         self.element = element
-        self.edges = edges
+        # self.edges = edges
+        # self.edge_inds = 
         self.N_params = element.N_params
-        self.N_edges = len(edges)
+        self.N_edges = N_edges
         self.trainable = trainable
 
         # Add parameters (e.g. conductance)
@@ -962,7 +998,7 @@ class ElementLayer(nn.Module):
         """
         Create a vectorized version of an element function for batch processing.
         
-        This method wraps element functions (rho, gamma, d_gamma) to handle
+        This method wraps element functions (rho, gamma, d_gamma_d_x, d_gamma_d_theta) to handle
         the expected tensor shapes: (batch_size, N_edges) for inputs and
         (N_params, N_edges) for parameters.
         
@@ -977,6 +1013,7 @@ class ElementLayer(nn.Module):
         """
         # First vectorize over batch index, then vectorize over edge index
         return tc.vmap(tc.vmap(func, in_dims=(0, None), out_dims=0), in_dims=(1, 1), out_dims=-1)
+        # return tc.vmap(tc.vmap(func, in_dims=(0, None), out_dims=0), in_dims=(1, 1), out_dims=1)
         # return tc.vmap(tc.vmap(func, in_dims=(1,1)), in_dims=(0,None))
 
     def rho(self, x):
@@ -1003,7 +1040,7 @@ class ElementLayer(nn.Module):
         """
         return self.vectorize(self.element.gamma)(x, self.theta)
 
-    def d_gamma(self, x):
+    def d_gamma_d_x(self, x):
         """
         Compute derivative of conductance function (differential conductance).
         
@@ -1013,7 +1050,13 @@ class ElementLayer(nn.Module):
         Returns:
             torch.Tensor: Differential conductance with shape (batch_size, N_edges)
         """
-        return self.vectorize(self.element.d_gamma)(x, self.theta)
+        return self.vectorize(self.element.d_gamma_d_x)(x, self.theta)
+
+    def d_gamma_d_theta(self, x):
+        """
+        Will return shape (N_batch, N_params, N_edges), where (N_params, N_edges) is the shape of the ElementLayer
+        """
+        return self.vectorize(self.element.d_gamma_d_theta)(x, self.theta)
 
     def d_rho_d_theta(self, x):
         """
@@ -1021,9 +1064,52 @@ class ElementLayer(nn.Module):
 
         Args:
             x (torch.Tensor):
-        
+
         Returns:
             torch.Tensor: Cocontent gradient with shape (batch_size, N_params, N_edges)
         """
         return self.vectorize(self.element.d_rho_d_theta)(x, self.theta)
+
+    def plot_gamma_curves(self, V_min, V_max, ax=None, figsize=(12,8), N_grid=100, **kwargs):
+
+        V_array = np.linspace(V_min, V_max, N_grid)
+        V_input = tc.tensor(V_array)[:,None] * tc.ones((1,self.N_edges))
+        gamma_vals = self.gamma(V_input).detach().numpy()   # shape (N_grid, N_edges)
+        alpha = 0.5 * utils.alpha_n(self.N_edges) # determine good alpha value based on how many edges there are
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.get_figure()
+
+        ax.axvline(0, color='lightgrey', linestyle='--', zorder=0)
+        ax.axhline(0, color='lightgrey', linestyle='--', zorder=0)
+        ax.plot(V_array, gamma_vals, color='k', alpha=alpha, **kwargs)
+
+        return fig, ax
+
+    def plot_gamma_values(self, V_edge, ax=None, figsize=(12,8), alpha_min=0.002, **kwargs):
+
+        if isinstance(V_edge, np.ndarray):
+            V = tc.tensor(V_edge)
+            V_np = V_edge
+        elif isinstance(V_edge, tc.Tensor):
+            V = V_edge.clone()
+            V_np = V.detach().numpy()
+
+        gamma_vals = self.gamma(V).detach().numpy()
+        N_points = self.N_edges * V_edge.shape[0]
+        alpha = max(utils.alpha_n(N_points), alpha_min)
+        # alpha = 0.01
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.get_figure()
+
+        ax.axvline(0, color='lightgrey', linestyle='--')
+        ax.axhline(0, color='lightgrey', linestyle='--')
+        ax.plot(V_np, gamma_vals, 'o', color='k', alpha=alpha, markeredgecolor='none', **kwargs)
+
+        return fig, ax
 
