@@ -697,7 +697,7 @@ class CircuitModel(nn.Module):
         """
         Compute edge voltages from node voltages using Kirchhoff's voltage law.
 
-        Edge voltages are computed as V_edge = Del^T @ V_node, where Del is the
+        Edge voltages are computed as V_edge = - Del @ V_node, where Del is the
         incidence matrix. Uses sparse or dense matrix operations based on configuration.
 
         Returns:
@@ -721,7 +721,7 @@ class CircuitModel(nn.Module):
         """
         Compute node currents from edge currents using Kirchhoff's current law.
 
-        Node currents are computed as I_node = Del @ I_edge, where Del is the
+        Node currents are computed as I_node = - Del^T @ I_edge, where Del is the
         incidence matrix. At equilibrium, all node currents should be zero.
 
         Returns:
