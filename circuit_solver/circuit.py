@@ -58,9 +58,9 @@ class CircuitModelConfig:
             self.optim_lr = defaults['optim_lr']
     
 
-class Circuit(nx.Graph):
+class Circuit(nx.DiGraph):
     """
-    A circuit representation extending NetworkX Graph with circuit-specific functionality.
+    A circuit representation extending NetworkX DiGraph with circuit-specific functionality.
     
     This class represents an electrical circuit as a graph where:
     - Nodes represent circuit connection points
@@ -71,12 +71,12 @@ class Circuit(nx.Graph):
     for circuit analysis using Kirchhoff's laws.
     
     Args:
-        graph (nx.Graph): The underlying graph structure of the circuit
+        graph (nx.DiGraph): The underlying graph structure of the circuit
         element_dict (dict): Maps circuit elements to lists of edges where they occur
                            Format: {element: [edge_list]}
     
     Attributes:
-        element_dict (dict): Dictionary mapping elements to their edge locations
+        element_dict (dict): Dictionary mapping elements to their edges
         elements (list): List of all circuit elements
         DelT (scipy.sparse matrix): Transpose of incidence matrix (nodes x edges)
         Del (scipy.sparse matrix): Incidence matrix (edges x nodes)
@@ -84,7 +84,7 @@ class Circuit(nx.Graph):
     Example:
         >>> import networkx as nx
         >>> from elements import Resistor
-        >>> graph = nx.Graph([(0,1), (1,2)])
+        >>> graph = nx.DiGraph([(0,1), (1,2)])
         >>> element_dict = {Resistor: [(0,1), (1,2)]}
         >>> circuit = Circuit(graph, element_dict)
     """
@@ -99,7 +99,7 @@ class Circuit(nx.Graph):
 
         Args:
             cls: The Circuit class
-            graph: NetworkX graph (not used in __new__, only in __init__)
+            graph: NetworkX DiGraph (not used in __new__, only in __init__)
             element_dict: Dictionary mapping elements to edges (not used in __new__)
 
         Returns:
@@ -112,26 +112,16 @@ class Circuit(nx.Graph):
         Initialize a Circuit from a graph and element dictionary.
 
         Args:
-            graph (nx.Graph): NetworkX graph defining circuit topology
+            graph (nx.DiGraph): NetworkX graph defining circuit topology
             element_dict (dict): Maps circuit elements to edge lists
         """
-        # Initialize as a NetworkX graph by copying the input graph
+        # Initialize as a NetworkX DiGraph by copying the input graph
         super(Circuit, self).__init__(graph)
 
-        # Sort edge lists in element_dict to match the adjacency matrix ordering
-        # This ensures consistency between element_dict and the incidence matrix
-        sorted_element_dict = {}
-        for element, edges in element_dict.items():
-            # Sort edges to match the order that will be used by nx.incidence_matrix
-            # NetworkX orders edges lexicographically (by node indices)
-            sorted_edges = sorted(edges, key=lambda edge: (min(edge), max(edge)))
-            sorted_element_dict[element] = sorted_edges
-
-        self.element_dict = sorted_element_dict
-        self.elements = list(sorted_element_dict.keys())
-
         # Check for duplicate element names and make them unique
-        element_names = [element.name for element in self.elements]
+        elements = element_dict.keys()
+        self.elements = elements
+        element_names = [element.name for element in elements]
         if len(element_names) != len(set(element_names)):
             import warnings
 
@@ -139,7 +129,7 @@ class Circuit(nx.Graph):
             name_counts = {}
             renamed_elements = []
 
-            for element in self.elements:
+            for element in elements:
                 base_name = element.name
                 if base_name not in name_counts:
                     name_counts[base_name] = 0
@@ -155,15 +145,40 @@ class Circuit(nx.Graph):
                 warning_msg += f"  {old_name} -> {new_name}\n"
             warnings.warn(warning_msg, UserWarning)
 
+        # Store element edge information
+        covered_edges = []
+        self.element_dict = element_dict
+        self.element_to_inds = {}
+        self.element_name_to_inds = {}
+        for element in elements:
+            # Check to see if all of the edges in the current element's list are edges in the graph. Direction matters! So if the list has (u, v) but only (v, u) is present, throw an error.
+            cur_edges = element_dict[element]
+            covered_edges += cur_edges  
+            all_here_sir = all([edge in self.edges() for edge in cur_edges])
+            
+            if not all_here_sir:
+                not_present = [edge for edge in cur_edges if edge not in self.edges()]
+                raise ValueError(f"Edges {not_present} labeled as {element.name} not found in graph")
+                            
+            # Generate a list of edge indices for this element.
+            # self.element_to_inds[element] = utils.edges_to_inds(cur_edges, self)
+            self.element_to_inds[element.name] = utils.edges_to_inds(cur_edges, self)
+            
+            # Add the element as the 'element' attribute to every edge
+            # Add the element name as the 'element_name' attribute to every edge
+            # Maybe later... do we really need this?
+        
+        # Check to see if every edge in the graph has an element. If not, throw an error.
+        covered_set = set(covered_edges)
+        edge_set = set(self.edges())
+        if not edge_set.issubset(covered_set):
+            missing_edges = edge_set - covered_set
+            raise ValueError(f"Edges {missing_edges} in graph not found in element_dict")
+
+        # Finally, the incidence matrices
         self.DelT = nx.incidence_matrix(self, oriented=True)
         self.Del = self.DelT.T
-
-        # add each element to all of the edges it is on
-        for element in self.elements:
-            edges = self.element_dict[element]
-            # Create a dictionary mapping each edge to its element
-            edge_attrs = {edge: {'element': element} for edge in edges}
-            nx.set_edge_attributes(self, edge_attrs)
+        
 
 
 class CircuitModel(nn.Module):
@@ -194,6 +209,8 @@ class CircuitModel(nn.Module):
         gamma (nn.Sequential): Current function module  
         d_gamma_d_x (nn.Sequential): Current voltage derivative module
         d_gamma_d_theta (nn.Sequential): Current parameter derivative module
+        clamped_nodes (list): Voltage-clamped nodes
+        free_nodes (list): Nodes with free voltages
         clamped_inds (list): Indices of voltage-clamped nodes
         free_inds (list): Indices of nodes with free voltages
         V_clamped (torch.Tensor): Voltages of clamped nodes (batch_size, n_clamped)
@@ -201,7 +218,7 @@ class CircuitModel(nn.Module):
     
     Example:
         >>> config = CircuitModelConfig(N_optim_steps=50, optim_lr=0.01)
-        >>> node_types = {'GROUND': [0], 'x_inds': [1,2,3]}
+        >>> node_types = {'GROUND': [0], 'x_nodes': [1,2,3]}
         >>> model = CircuitModel(circuit, node_types, config)
         >>> x_input = torch.randn(10, 3)  # batch_size=10, 3 input nodes
         >>> voltages, obj_history = model(x_input)
@@ -219,6 +236,7 @@ class CircuitModel(nn.Module):
         
         super(CircuitModel, self).__init__()
         self.circuit = circuit
+        self.element_to_inds = self.circuit.element_to_inds.copy()
         self.node_type_dict = node_type_dict
         self.node_types = list(node_type_dict.keys())
 
@@ -275,6 +293,8 @@ class CircuitModel(nn.Module):
 
         ## Initialize everything needed for input structure
         # initialize clamped and free node lists
+        self.clamped_nodes = []
+        self.free_nodes = []
         self.clamped_inds = []      
         self.free_inds = []         
         
@@ -330,27 +350,20 @@ class CircuitModel(nn.Module):
         """
         Create shared ElementLayer instances that will be reused across rho, gamma, d_gamma_d_x, d_gamma_d_theta, and d_rho_d_gamma modules
         """
+            
         self.element_layers = {}
-        self.element_to_edge_inds = {}
-        
         for element in self.circuit.elements:
             edges = self.circuit.element_dict[element]
-            edge_inds = utils.edges_to_inds(edges, self.circuit)
+            N_edges = len(edges)
             
             # Create one ElementLayer instance per element type
-            # element_layer = ElementLayer(element, edges=edges)
-            N_edges = len(edges)
             element_layer = ElementLayer(element, N_edges)
-            element_layer.edges = edges
-            element_layer.edge_inds = edge_inds
-
+            
             # Store the shared layer and its edge indices
             self.element_layers[element.name] = element_layer
-            self.element_to_edge_inds[element.name] = edge_inds
-            
 
-            # Register as a named module for parameter tracking
-            self.add_module(f"{element.name}_layer", element_layer)
+        # Register as a named module for parameter tracking
+        self.add_module(f"{element.name}_layer", element_layer)
 
     def _dense_to_sparse(self, dense_tensor):
         """
@@ -386,7 +399,7 @@ class CircuitModel(nn.Module):
         
         masked_nonlinearities = []
         for element_name, element_layer in self.element_layers.items():
-            edge_indices = self.element_to_edge_inds[element_name]
+            edge_indices = self.element_to_inds[element_name]
             
             # Wrap shared layer's rho method in MaskedNonlinearity
             masked_nl = MaskedNonlinearity(
@@ -411,7 +424,7 @@ class CircuitModel(nn.Module):
         
         masked_gamma_nonlinearities = []
         for element_name, element_layer in self.element_layers.items():
-            edge_indices = self.element_to_edge_inds[element_name]
+            edge_indices = self.element_to_inds[element_name]
             
             # Wrap shared layer's gamma method in MaskedNonlinearity
             masked_gamma = MaskedNonlinearity(
@@ -435,7 +448,7 @@ class CircuitModel(nn.Module):
         
         masked_d_gamma_d_x_nonlinearities = []
         for element_name, element_layer in self.element_layers.items():
-            edge_indices = self.element_to_edge_inds[element_name]
+            edge_indices = self.element_to_inds[element_name]
             
             # Wrap shared layer's d_gamma_d_x method in MaskedNonlinearity
             masked_d_gamma_d_x = MaskedNonlinearity(
@@ -467,7 +480,7 @@ class CircuitModel(nn.Module):
             if isinstance(module, ElementLayer):
                 module.clip_parameters()
 
-    def set_inputs(self, *node_inds):
+    def set_inputs(self, *node_groups):
         """
         Set which nodes will have clamped (fixed) voltages during simulation.
 
@@ -480,16 +493,16 @@ class CircuitModel(nn.Module):
                        OR string keys from node_type_dict
 
         Example:
-            >>> x_inds = [1, 2, 3, 4]
-            >>> y_inds = [5, 6, 7]
-            >>> model.set_inputs(x_inds)  # Only clamp x_inds
-            >>> model.set_inputs(x_inds, y_inds)  # Clamp both x_inds and y_inds
-            >>> model.set_inputs('x_inds', 'y_inds')  # Use node_type_dict keys
+            >>> x_nodes = [1, 2, 3, 4]
+            >>> y_nodes = [5, 6, 7]
+            >>> model.set_inputs(x_)  # Only clamp x_nodes
+            >>> model.set_inputs(x_nodes, y_nodes)  # Clamp both x_nodes and y_nodes
+            >>> model.set_inputs('x_nodes', 'y_nodes')  # Use node_type_dict keys
         """
 
         # Convert string arguments to node lists using node_type_dict
         resolved_node_groups = []
-        for i, node_group in enumerate(node_inds):
+        for i, node_group in enumerate(node_groups):
             if isinstance(node_group, str):
                 if node_group not in self.node_type_dict:
                     raise ValueError(f"String argument '{node_group}' not found in node_type_dict. "
@@ -514,9 +527,9 @@ class CircuitModel(nn.Module):
                     raise ValueError(f"Node {node} in argument {i} is not a valid circuit node. "
                                    f"Valid nodes are: {sorted(all_circuit_nodes)}")
 
-                # Check if node is an integer (assuming node indices are integers)
-                if not isinstance(node, (int, np.integer)):
-                    raise TypeError(f"Node {node} in argument {i} must be an integer, got {type(node)}")
+                # # Check if node is an integer (assuming nodes are integers)
+                # if not isinstance(node, (int, np.integer)):
+                #     raise TypeError(f"Node {node} in argument {i} must be an integer, got {type(node)}")
 
         # Check for duplicate nodes across all input groups
         all_input_nodes = []
@@ -532,22 +545,27 @@ class CircuitModel(nn.Module):
         # 'HIGH' always set to self.HIGH_voltage
         # 'LOW' always set to self.LOW_voltage
         self.clamped_inds = []
+        self.clamped_nodes = []
         for n in ['GROUND', 'HIGH', 'LOW']:
             if n in self.node_types:
-                self.clamped_inds.extend(self.node_type_dict[n])
+                self.clamped_nodes.extend(self.node_type_dict[n])
         
         # Add any other inds in resolved_node_groups to clamp_inds
         for node_group in resolved_node_groups:
-            self.clamped_inds.extend(list(node_group))
+            self.clamped_nodes.extend(list(node_group))
 
         # Place the remaining the indices in free_inds
         all_nodes = list(self.circuit.nodes())
-        self.free_inds = [node for node in all_nodes if node not in self.clamped_inds]
+        self.free_nodes = [node for node in all_nodes if node not in self.clamped_nodes]
+
+        # Now get the indices for these nodes
+        self.clamped_inds = utils.nodes_to_inds(self.clamped_nodes, self.circuit)
+        self.free_inds = utils.nodes_to_inds(self.free_nodes, self.circuit)
 
         # update incidence matrices Del_clamped and Del_free
         # Create dense versions first using indexing
-        Del_clamped_dense = self.Del_dense[:,self.clamped_inds]
-        Del_free_dense = self.Del_dense[:,self.free_inds]
+        Del_clamped_dense = self.Del_dense[:, self.clamped_inds]
+        Del_free_dense = self.Del_dense[:, self.free_inds]
 
         # Convert to sparse matrices if sparse mode is enabled
         if self.use_sparse:
@@ -560,6 +578,7 @@ class CircuitModel(nn.Module):
             self.Del_free = Del_free_dense
             self.Del = self.Del_dense
             self.DelT = self.Del_dense.t()
+
 
     def clamp(self, *tensors):
         """
@@ -763,7 +782,7 @@ class CircuitModel(nn.Module):
 
     def plot_layer_state(self, layer_name, ax=None, figsize=[12,8], include_lines=False, **kwargs):
         layer = self.element_layers[layer_name]
-        edge_inds = self.element_to_edge_inds[layer_name]
+        edge_inds = self.element_to_inds[layer_name]
         V_edge = self.V_edge()[:,edge_inds]
         V_np = V_edge.detach().numpy()
         V_lims = np.min(V_np), np.max(V_np)
@@ -797,7 +816,7 @@ class MaskedNonlinearity(nn.Module):
         
         Args:
             nonlinearity (callable): Function to apply to selected indices
-            indices (list, array, or slice): Indices to apply nonlinearity to
+            indices (list, array, or slice): Edge indices to apply nonlinearity to. Since inputs will be in the edge vector space as defined by the incidence matrix, the indices correspond to indices of that matrix.
             total_dim (int): Total dimension of input tensors
         """
         super().__init__()

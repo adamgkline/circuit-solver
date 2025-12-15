@@ -193,7 +193,7 @@ def GeoCoupledLearning(X, Y, model, config=None, **params):
         
         # update parameters and history
         for element_name, layer in model.element_layers.items():
-            edge_inds = model.element_to_edge_inds[element_name]
+            edge_inds = model.element_to_inds[element_name]
             V_F = V_edge_F[:, edge_inds]      
             V_C = V_edge_C[:, edge_inds]
 
@@ -273,7 +273,7 @@ def AdjointLearning(X, Y, model, config=None, **params):
         
         # update parameters and history
         for element_name, layer in model.element_layers.items():
-            edge_inds = model.element_to_edge_inds[element_name]
+            edge_inds = model.element_to_inds[element_name]
             V_F = V_edge_F[:, edge_inds]      
             V_C = V_edge_C[:, edge_inds]
 
@@ -357,7 +357,7 @@ def InvariantLearning(X, Y, model, config=None, **params):
         
         # update parameters and history
         for element_name, layer in model.element_layers.items():
-            edge_inds = model.element_to_edge_inds[element_name]
+            edge_inds = model.element_to_inds[element_name]
             V_F = V_edge_F[:, edge_inds]      
             V_C = V_edge_C[:, edge_inds]
 
@@ -446,7 +446,7 @@ def NCCoupledLearning(X, Y, model, config=None, **params):
         
         # update parameters and history
         for element_name, layer in model.element_layers.items():
-            edge_inds = model.element_to_edge_inds[element_name]
+            edge_inds = model.element_to_inds[element_name]
             N_edges_cur = layer.N_edges
             V_f = V_edge_f[:, edge_inds]      
             V_c = V_edge_c[:, edge_inds]
@@ -548,7 +548,7 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
         
         # update parameters and history
         for element_name, layer in model.element_layers.items():
-            edge_inds = model.element_to_edge_inds[element_name]
+            edge_inds = model.element_to_inds[element_name]
             V_F = V_edge_F[:, edge_inds]      
             cur_epsilon = epsilon[:, edge_inds]
 
@@ -637,7 +637,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
         
         # update parameters and history
         for element_name, layer in model.element_layers.items():
-            edge_inds = model.element_to_edge_inds[element_name]
+            edge_inds = model.element_to_inds[element_name]
             V_F = V_edge_F[:, edge_inds]      
             V_C = V_edge_C[:, edge_inds]
 

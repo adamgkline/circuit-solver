@@ -411,37 +411,37 @@ def look(img):
 def list_difference(list_1, list_2):
     return list(set(list_1) - set(list_2))
 
-def all_pairs_between(a_inds, b_inds):
+def all_pairs_between(a_nodes, b_nodes):
     """
-
+    Return a list of tuples (u, v) connecting all u in a_nodes to all v in b_nodes
     """
     pairs_between = []
-    for a in a_inds:
-        for b in b_inds:
+    for a in a_nodes:
+        for b in b_nodes:
             pairs_between.append((a, b))
     
     return pairs_between
 
-def get_edges_between(a_inds, b_inds, graph):
+def get_edges_between(a_nodes, b_nodes, graph):
     """
-    Given two lists of node indices for a graph, return a list of edge tuples for each edge connecting one set to the other.
+    Given two lists of nodes for a graph, return a list of edge tuples for each edge connecting one set to the other.
 
     Args:
-        a_inds: List of node indices
-        b_inds: List of node indices
+        a_nodes: List of nodes
+        b_nodes: List of nodes
         graph: NetworkX graph object
         
     Returns:
-        List of edge tuples connecting nodes in a_inds to nodes in b_inds
+        List of edge tuples connecting nodes in a_nodes to nodes in b_nodes
         
     Example:
         graph = nx.Graph([(0,1), (1,2), (2,3), (0,3)])
-        a_inds = [0, 1]
-        b_inds = [2, 3]
-        edges = get_edges_between(a_inds, b_inds, graph)  # Returns [(1,2), (0,3)]
+        a_nodes = [0, 1]
+        b_nodes = [2, 3]
+        edges = get_edges_between(a_nodes, b_nodes, graph)  # Returns [(1,2), (0,3)]
     """
-    a_set = set(a_inds)
-    b_set = set(b_inds)
+    a_set = set(a_nodes)
+    b_set = set(b_nodes)
     
     edges_between = []
     for edge in graph.edges():
@@ -451,7 +451,23 @@ def get_edges_between(a_inds, b_inds, graph):
     
     return edges_between
 
+
+def nodes_to_inds(nodes, graph):
+    """
+    For a list of nodes, return their corresponding indices in list(graph.nodes())
+    """
+
+    node_list = list(graph.nodes())
+    node_to_index = {node: i for i, node in enumerate(node_list)}
+    indices = []
+    for node in nodes:
+        if node in node_to_index:
+            indices.append(node)
+        else:
+            raise ValueError(f"Node {node} not found in graph")
     
+    return indices
+
 def edges_to_inds(edges, graph):
     """
     Given a graph and a list of edges, return the indices of the edges in graph.edges().
@@ -476,11 +492,8 @@ def edges_to_inds(edges, graph):
     
     indices = []
     for edge in edges:
-        # Handle both (u,v) and (v,u) since NetworkX edges are undirected
         if edge in edge_to_index:
             indices.append(edge_to_index[edge])
-        elif (edge[1], edge[0]) in edge_to_index:
-            indices.append(edge_to_index[(edge[1], edge[0])])
         else:
             raise ValueError(f"Edge {edge} not found in graph")
     
