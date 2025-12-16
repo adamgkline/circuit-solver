@@ -5,12 +5,14 @@ import warnings
 from tqdm import tqdm
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
+from circuit_solver import utils
+
 
 @dataclass
 class BaseTrainingConfig:
     """Base configuration class with common validation logic"""
-    x_inds: int = 'x'
-    y_inds: int = 'y'
+    x_nodes: int = 'x'
+    y_nodes: int = 'y'
     batch_size: int = 100
     N_epochs: Optional[int] = None
     N_batches: Optional[int] = None
@@ -80,7 +82,7 @@ def argmax_classification_accuracy(y, y_free):
 
 def extract_training_params(**params):
     """Extract training parameters from kwargs for config creation"""
-    valid_keys = {'x_inds', 'y_inds', 'batch_size', 'N_epochs', 'N_batches', 'eta', 'alpha', 'nu'}
+    valid_keys = {'x_nodes', 'y_nodes', 'batch_size', 'N_epochs', 'N_batches', 'eta', 'alpha', 'nu'}
     return {k: v for k, v in params.items() if k in valid_keys}
 
 def convert_to_tensors(X, Y):
@@ -99,13 +101,13 @@ def validate_data_shapes(X, Y):
         raise ValueError(f"X and Y must have the same shape in the first dimension but have shapes {P} and {PY}")
     return P, N, M
 
-def resolve_node_indices(x_inds, y_inds, model):
+def resolve_node_indices(x_nodes, y_nodes, model):
     """Convert string node indices to actual indices if needed"""
-    if type(x_inds) is str:
-        x_inds = model.node_type_dict[x_inds]
-    if type(y_inds) is str:
-        y_inds = model.node_type_dict[y_inds]
-    return x_inds, y_inds
+    if type(x_nodes) is str:
+        x_nodes = model.node_type_dict[x_nodes]
+    if type(y_nodes) is str:
+        y_nodes = model.node_type_dict[y_nodes]
+    return x_nodes, y_nodes
 
 def initialize_param_history(model):
     """Initialize parameter history dictionary"""
@@ -155,7 +157,9 @@ def GeoCoupledLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_inds, y_inds = resolve_node_indices(cfg.x_inds, cfg.y_inds, model)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
     # Initialize tracking arrays
     param_history = initialize_param_history(model)
@@ -179,7 +183,7 @@ def GeoCoupledLearning(X, Y, model, config=None, **params):
         y = y.to(dtype=model.dtype, device=model.device)
 
         # Compute free and clamped states
-        model.set_inputs(x_inds)
+        model.set_inputs(x_nodes)
         V_node_F, _ = model(x)
         y_F = V_node_F[:, y_inds]
         V_edge_F = model.V_edge() 
@@ -187,7 +191,7 @@ def GeoCoupledLearning(X, Y, model, config=None, **params):
         # Compute clamped state
         y_C = cfg.eta * y + (1 - cfg.eta) * y_F.detach()
 
-        model.set_inputs(x_inds, y_inds)
+        model.set_inputs(x_nodes, y_nodes)
         _ = model(x, y_C)
         V_edge_C = model.V_edge()
         
@@ -236,7 +240,9 @@ def AdjointLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_inds, y_inds = resolve_node_indices(cfg.x_inds, cfg.y_inds, model)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
     # Initialize tracking arrays
     param_history = initialize_param_history(model)
@@ -259,7 +265,7 @@ def AdjointLearning(X, Y, model, config=None, **params):
         y = y.to(dtype=model.dtype, device=model.device)
 
         # Compute free and clamped states
-        model.set_inputs(x_inds)
+        model.set_inputs(x_nodes)
         V_node_F, _ = model(x)
         y_F = V_node_F[:, y_inds]
         V_edge_F = model.V_edge() 
@@ -267,7 +273,7 @@ def AdjointLearning(X, Y, model, config=None, **params):
         # Compute clamped state
         y_C = cfg.eta * y + (1 - cfg.eta) * y_F.detach()
 
-        model.set_inputs(x_inds, y_inds)
+        model.set_inputs(x_nodes, y_nodes)
         _ = model(x, y_C)
         V_edge_C = model.V_edge()
         
@@ -316,7 +322,9 @@ def InvariantLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_inds, y_inds = resolve_node_indices(cfg.x_inds, cfg.y_inds, model)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
     # Initialize tracking arrays
     param_history = initialize_param_history(model)
@@ -343,7 +351,7 @@ def InvariantLearning(X, Y, model, config=None, **params):
         y = y.to(dtype=model.dtype, device=model.device)
 
         # Compute free and clamped states
-        model.set_inputs(x_inds)
+        model.set_inputs(x_nodes)
         V_node_F, _ = model(x)
         y_F = V_node_F[:, y_inds]
         V_edge_F = model.V_edge() 
@@ -351,7 +359,7 @@ def InvariantLearning(X, Y, model, config=None, **params):
         # Compute clamped state
         y_C = cfg.eta * y + (1 - cfg.eta) * y_F.detach()
 
-        model.set_inputs(x_inds, y_inds)
+        model.set_inputs(x_nodes, y_nodes)
         _ = model(x, y_C)
         V_edge_C = model.V_edge()
         
@@ -403,7 +411,9 @@ def NCCoupledLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_inds, y_inds = resolve_node_indices(cfg.x_inds, cfg.y_inds, model)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
     # Initialize tracking arrays
     param_history = initialize_param_history(model)
@@ -423,14 +433,14 @@ def NCCoupledLearning(X, Y, model, config=None, **params):
         y = y.to(dtype=model.dtype, device=model.device)
 
         # Compute free and clamped states
-        model.set_inputs(x_inds)
+        model.set_inputs(x_nodes)
         V_node_f, _ = model(x)      # get free node voltages (to build clamped state)
         y_f = V_node_f[:, y_inds].detach()
         V_edge_f = model.V_edge()
 
         # Compute clamped state
         y_c = cfg.eta * y + (1 - cfg.eta) * y_f    #  build clamped state
-        model.set_inputs(x_inds, y_inds)
+        model.set_inputs(x_nodes, y_nodes)
         _ = model(x, y_c)
         V_edge_c = model.V_edge()
 
@@ -513,7 +523,9 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_inds, y_inds = resolve_node_indices(cfg.x_inds, cfg.y_inds, model)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
     # Initialize tracking arrays
     param_history = initialize_param_history(model)
@@ -535,13 +547,13 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
         y = y.to(dtype=model.dtype, device=model.device)
 
         # Compute free and clamped states
-        model.set_inputs(x_inds)
+        model.set_inputs(x_nodes)
         V_node_F, _ = model(x)
         y_F = V_node_F[:, y_inds]
         V_edge_F = model.V_edge() 
 
         # Compute error
-        model.set_inputs(x_inds, y_inds)
+        model.set_inputs(x_nodes, y_nodes)
         _ = model(x, y)
         V_edge_T = model.V_edge()
         epsilon = V_edge_T.detach() - V_edge_F.detach()
@@ -598,7 +610,9 @@ def CoupledLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_inds, y_inds = resolve_node_indices(cfg.x_inds, cfg.y_inds, model)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
     # Initialize tracking arrays
     param_history = initialize_param_history(model)
@@ -623,7 +637,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
         y = y.to(dtype=model.dtype, device=model.device)
 
         # Compute free and clamped states
-        model.set_inputs(x_inds)
+        model.set_inputs(x_nodes)
         V_node_F, _ = model(x)
         y_F = V_node_F[:, y_inds]
         V_edge_F = model.V_edge() 
@@ -631,7 +645,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
         # Compute clamped state
         y_C = cfg.eta * y + (1 - cfg.eta) * y_F.detach()
 
-        model.set_inputs(x_inds, y_inds)
+        model.set_inputs(x_nodes, y_nodes)
         _ = model(x, y_C)
         V_edge_C = model.V_edge()
         
@@ -687,7 +701,9 @@ def TestClassificationAccuracy(X, Y, model, config=None, **params):
     P, N, M = validate_data_shapes(X, Y)
 
     # Resolve node indices
-    x_inds, y_inds = resolve_node_indices(cfg.x_inds, cfg.y_inds, model)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
     # Calculate number of batches
     batches_per_epoch = P // cfg.batch_size
@@ -698,7 +714,7 @@ def TestClassificationAccuracy(X, Y, model, config=None, **params):
     loss = np.zeros(N_batches)
 
     # Set model to evaluation mode
-    model.set_inputs(x_inds)
+    model.set_inputs(x_nodes)
 
     # Process all batches
     for batch_idx in tqdm(range(N_batches), desc='Testing'):

@@ -462,7 +462,7 @@ def nodes_to_inds(nodes, graph):
     indices = []
     for node in nodes:
         if node in node_to_index:
-            indices.append(node)
+            indices.append(node_to_index[node])
         else:
             raise ValueError(f"Node {node} not found in graph")
     
