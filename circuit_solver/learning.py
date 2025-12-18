@@ -157,7 +157,7 @@ def GeoCoupledLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
     x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
     y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
@@ -240,7 +240,7 @@ def AdjointLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
     x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
     y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
@@ -322,7 +322,7 @@ def InvariantLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
     x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
     y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
@@ -411,7 +411,7 @@ def NCCoupledLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
     x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
     y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
@@ -523,7 +523,7 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
     x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
     y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
@@ -610,7 +610,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
     N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
 
     # Resolve node indices
-    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
     x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
     y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 
@@ -701,7 +701,7 @@ def TestClassificationAccuracy(X, Y, model, config=None, **params):
     P, N, M = validate_data_shapes(X, Y)
 
     # Resolve node indices
-    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model.circuit)
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
     x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
     y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
 

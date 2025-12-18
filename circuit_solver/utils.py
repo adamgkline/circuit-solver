@@ -582,7 +582,7 @@ def get_preimage(dict):
     return inverted_dict
 
 
-def er_network(n, p, relabel_nodes=True, max_connected_attempts=100):
+def er_network(n, p, directed=True, relabel_nodes=True, max_connected_attempts=100):
     graph = None
     not_connected = True
     counter = 0
@@ -590,9 +590,14 @@ def er_network(n, p, relabel_nodes=True, max_connected_attempts=100):
         if counter > max_connected_attempts:
             print('no connected graph found')
             return None
-        graph = nx.erdos_renyi_graph(n, p)
-        not_connected = not nx.is_connected(graph)
+        graph = nx.erdos_renyi_graph(n, p, directed=directed)
+        if directed: 
+            check_graph = graph.to_undirected()
+        else:
+            check_graph = graph
+        not_connected = not nx.is_connected(check_graph)
         counter += 1
+
 
     for i, node in enumerate(graph.nodes):
         theta = i * 2 * np.pi / n
