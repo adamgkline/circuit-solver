@@ -661,14 +661,15 @@ def generate_layer_graph(circuit):
     # generate layer structure for outputs
     # isolate output subgraph O and solve the coloring problem
     O = nx.induced_subgraph(graph, outputs)
-    O_node_to_color = coloring.greedy_color(O)
+    # TODO: `coloring` is not imported — should be `nx.coloring.greedy_color(O)`
+    O_node_to_color = coloring.greedy_color(O)  # BUG: NameError at runtime
 
     # construct map from colors back to nodes
     O_color_to_node = get_preimage(O_node_to_color) # dict[color] = {nodes with that color}
 
     # now solve coloring problem to get layer structure for hidden node graph H
     H = nx.induced_subgraph(graph, hiddens)
-    H_node_to_color = coloring.greedy_color(H)
+    H_node_to_color = coloring.greedy_color(H)  # BUG: same as above
     H_color_to_node = get_preimage(H_node_to_color)
 
     # finally, generate the full layer graph. Each node is a layer (color), and two colors are conneced if they contain nodes which were originally connected

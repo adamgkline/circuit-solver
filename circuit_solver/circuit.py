@@ -120,7 +120,7 @@ class Circuit(nx.DiGraph):
 
         # Check for duplicate element names and make them unique
         elements = element_dict.keys()
-        self.elements = elements
+        self.elements = set(elements)   # Needed for pickle-ability 
         element_names = [element.name for element in elements]
         if len(element_names) != len(set(element_names)):
             import warnings
@@ -178,7 +178,7 @@ class Circuit(nx.DiGraph):
         # Finally, the incidence matrices
         self.DelT = nx.incidence_matrix(self, oriented=True)
         self.Del = self.DelT.T
-        
+
 
 
 class CircuitModel(nn.Module):
@@ -362,8 +362,8 @@ class CircuitModel(nn.Module):
             # Store the shared layer and its edge indices
             self.element_layers[element.name] = element_layer
 
-        # Register as a named module for parameter tracking
-        self.add_module(f"{element.name}_layer", element_layer)
+            # Register as a named module for parameter tracking
+            self.add_module(f"{element.name}_layer", element_layer)
 
     def _dense_to_sparse(self, dense_tensor):
         """
@@ -400,6 +400,8 @@ class CircuitModel(nn.Module):
         masked_nonlinearities = []
         for element_name, element_layer in self.element_layers.items():
             edge_indices = self.element_to_inds[element_name]
+            if len(edge_indices) == 0:
+                raise ValueError(f'No edges in list provided for element named {element_name}')
             
             # Wrap shared layer's rho method in MaskedNonlinearity
             masked_nl = MaskedNonlinearity(
@@ -495,7 +497,7 @@ class CircuitModel(nn.Module):
         Example:
             >>> x_nodes = [1, 2, 3, 4]
             >>> y_nodes = [5, 6, 7]
-            >>> model.set_inputs(x_)  # Only clamp x_nodes
+            >>> model.set_inputs(x_nodes)  # Only clamp x_nodes
             >>> model.set_inputs(x_nodes, y_nodes)  # Clamp both x_nodes and y_nodes
             >>> model.set_inputs('x_nodes', 'y_nodes')  # Use node_type_dict keys
         """
@@ -722,7 +724,7 @@ class CircuitModel(nn.Module):
         Returns:
             torch.Tensor: Edge voltages with shape (batch_size, n_edges)
         """
-        # Convert einsum 'ab, cb -> ca' to matrix multiplication: Del @ V
+        # This is just implementing $\Delta V^{(0)}$
         V_clamped_edge = - self.mm_func(self.V_clamped, self.Del_clamped.t())
         V_free_edge = - self.mm_func(self.V_free, self.Del_free.t())
         return V_clamped_edge + V_free_edge
@@ -789,6 +791,66 @@ class CircuitModel(nn.Module):
         if include_lines:
             fig, ax = layer.plot_gamma_curves(*V_lims, ax=ax, figsize=figsize, **kwargs)
         return layer.plot_gamma_values(V_edge, ax=ax, figsize=figsize, **kwargs)
+
+    def plot_node_voltages(self, node_types=None, axes=None, figsize=None, bins=60, sharey=False, **kwargs):
+        """
+        Plot histograms of current node voltages, grouped by node type.
+
+        Uses the circuit's current state (last forward pass), mirroring
+        plot_layer_state. Call model(x) first to populate voltages.
+
+        Args:
+            node_types (list of str, optional): Keys from node_type_dict to plot.
+                Defaults to all types except 'GROUND', 'HIGH', and 'LOW'.
+            axes (array-like of Axes, optional): Pre-existing axes to plot into.
+                Must have one Axes per node type being plotted.
+            figsize (tuple, optional): Figure size. Defaults to (4 * n_types, 4).
+            bins (int): Number of histogram bins.
+            **kwargs: Passed to ax.hist().
+
+        Returns:
+            tuple: (fig, axes)
+        """
+        _reference_types = {'GROUND', 'HIGH', 'LOW'}
+
+        if node_types is None:
+            node_types = [k for k in self.node_type_dict if k not in _reference_types]
+
+        V_np = self.V_node().detach().cpu().numpy()  # (batch_size, N_nodes)
+
+        n = len(node_types)
+        if axes is None:
+            if figsize is None:
+                figsize = (4 * n, 4)
+            fig, axes = plt.subplots(1, n, figsize=figsize, sharey=sharey)
+            if n == 1:
+                axes = [axes]
+        else:
+            axes = list(axes)
+            fig = axes[0].get_figure()
+
+        for ax, name in zip(axes, node_types):
+            inds = utils.nodes_to_inds(self.node_type_dict[name], self.circuit)
+            voltages = V_np[:, inds].ravel()
+            ax.hist(voltages, bins=bins, **kwargs)
+            ax.set_title(f'{name}  (n={len(self.node_type_dict[name])})')
+            ax.set_xlabel('voltage')
+
+        axes[0].set_ylabel('count')
+        return fig, axes
+
+    def reset(self):
+        """Restore all element layers to their initial parameter values."""
+        for layer in self.element_layers.values():
+            layer.reset()
+
+    def restore_model_to_t(self, history, t):
+        """
+        history should be a dict with at least one key for each ElementLayer in the model. The index convention for each entry is history['layer_name'][param index, time, edge]
+        """
+        for name, layer in self.element_layers.items():
+            theta_t = history[name][:, t]
+            layer.set_parameters(theta_t)
 
 
 class MaskedNonlinearity(nn.Module):
@@ -890,10 +952,19 @@ class ElementLayer(nn.Module):
         super(ElementLayer, self).__init__()
         self.element = element
         # self.edges = edges
-        # self.edge_inds = 
+        # self.edge_inds =
         self.N_params = element.N_params
         self.N_edges = N_edges
-        self.trainable = trainable
+
+        # Build per-parameter learning rate mask of shape (N_params, 1) so it
+        # broadcasts correctly against gradient tensors of shape (N_params, N_edges).
+        if trainable and element.learning_rates is not None:
+            lr = tc.tensor(element.learning_rates, dtype=tc.float32).reshape(self.N_params, 1)
+        elif trainable:
+            lr = tc.ones(self.N_params, 1, dtype=tc.float32)
+        else:
+            lr = tc.zeros(self.N_params, 1, dtype=tc.float32)
+        self.register_buffer('learning_rates', lr)
 
         # Add parameters (e.g. conductance)
         param_shape = (self.N_params, self.N_edges)
@@ -902,6 +973,7 @@ class ElementLayer(nn.Module):
         # Initialize parameters based on element's init_mode
         initial_values = self._initialize_parameters(param_shape)
         self.theta = Parameter(initial_values, requires_grad=trainable)
+        self.register_buffer('theta_init', initial_values.clone())
 
     def _initialize_parameters(self, shape):
         """
@@ -956,9 +1028,19 @@ class ElementLayer(nn.Module):
                     values[i] = tc.randn(N_edges) * std + mean
 
         elif element.init_mode == 'geometric_mean':
-            # Initialize with geometric mean of param_ranges (default behavior)
+            # Initialize with geometric mean of param_ranges (default behavior).
+            # Falls back to arithmetic midpoint when the range spans zero, because
+            # sqrt(lo * hi) is imaginary (NaN) when lo < 0 < hi.
+            # Note: tc.where evaluates both branches before selecting, so the product
+            # must be clamped to >=0 before sqrt to avoid NaN poisoning the result.
             param_ranges = tc.tensor(element.param_ranges, dtype=tc.float32)
-            geom_mean = tc.sqrt(param_ranges[:, 0] * param_ranges[:, 1])
+            lo, hi = param_ranges[:, 0], param_ranges[:, 1]
+            both_nonneg = (lo >= 0) & (hi >= 0)
+            geom_mean = tc.where(
+                both_nonneg,
+                tc.sqrt((lo * hi).clamp(min=0)),  # clamp prevents sqrt(NaN) in unused branch
+                (lo + hi) / 2,                    # midpoint for ranges that span zero
+            )
             values = tc.ones(shape) * geom_mean[:, None]
 
         else:
@@ -975,6 +1057,11 @@ class ElementLayer(nn.Module):
 
         return values
     
+    def reset(self):
+        """Restore parameters to their initial values (as set at construction time)."""
+        with tc.no_grad():
+            self.theta.data.copy_(self.theta_init)
+
     def set_parameters(self, theta):
         self.theta.data = tc.tensor(theta)
         self.clip_parameters()
@@ -1094,7 +1181,8 @@ class ElementLayer(nn.Module):
         V_array = np.linspace(V_min, V_max, N_grid)
         V_input = tc.tensor(V_array)[:,None] * tc.ones((1,self.N_edges))
         gamma_vals = self.gamma(V_input).detach().numpy()   # shape (N_grid, N_edges)
-        alpha = 0.5 * utils.alpha_n(self.N_edges) # determine good alpha value based on how many edges there are
+        if 'alpha' not in kwargs.keys():
+            kwargs['alpha'] = 0.5 * utils.alpha_n(self.N_edges) # determine good alpha value based on how many edges there are
 
         if ax is None:
             fig, ax = plt.subplots(figsize=figsize)
@@ -1103,7 +1191,7 @@ class ElementLayer(nn.Module):
 
         ax.axvline(0, color='lightgrey', linestyle='--', zorder=0)
         ax.axhline(0, color='lightgrey', linestyle='--', zorder=0)
-        ax.plot(V_array, gamma_vals, color='k', alpha=alpha, **kwargs)
+        ax.plot(V_array, gamma_vals, color='k', **kwargs)
 
         return fig, ax
 
@@ -1118,7 +1206,10 @@ class ElementLayer(nn.Module):
 
         gamma_vals = self.gamma(V).detach().numpy()
         N_points = self.N_edges * V_edge.shape[0]
-        alpha = max(utils.alpha_n(N_points), alpha_min)
+
+        if 'alpha' not in kwargs.keys():
+            kwargs['alpha'] = max(utils.alpha_n(N_points), alpha_min) # determine good alpha value based on how many edges there are
+        
         # alpha = 0.01
 
         if ax is None:
@@ -1128,7 +1219,7 @@ class ElementLayer(nn.Module):
 
         ax.axvline(0, color='lightgrey', linestyle='--')
         ax.axhline(0, color='lightgrey', linestyle='--')
-        ax.plot(V_np, gamma_vals, 'o', color='k', alpha=alpha, markeredgecolor='none', **kwargs)
+        ax.plot(V_np, gamma_vals, 'o', color='k', markeredgecolor='none', **kwargs)
 
         return fig, ax
 
