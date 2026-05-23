@@ -11,8 +11,8 @@ from circuit_solver import utils
 @dataclass
 class BaseTrainingConfig:
     """Base configuration class with common validation logic"""
-    x_nodes: str = 'x'  # TODO: was annotated as `int` but should be `str` (or `Union[str, list]`)
-    y_nodes: str = 'y'  # TODO: same as above
+    x_nodes: str = 'x'  
+    y_nodes: str = 'y'
     batch_size: int = 100
     N_epochs: Optional[int] = None
     N_batches: Optional[int] = None
@@ -190,10 +190,9 @@ clamping_functions = {
 ###### PARAMETER UPDATE METHODS
 @dataclass
 class AdamConfig:
-    # TODO: trailing commas make these tuples instead of floats — remove commas
-    beta1 : float = 0.9,   # BUG: default is (0.9,) not 0.9
-    beta2 : float = 0.999, # BUG: default is (0.999,) not 0.999
-    eps : float = 1E-6,    # BUG: default is (1e-6,) not 1e-6
+    beta1 : float = 0.9   
+    beta2 : float = 0.999 
+    eps : float = 1E-6    
 
 
 

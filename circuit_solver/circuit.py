@@ -482,6 +482,17 @@ class CircuitModel(nn.Module):
             if isinstance(module, ElementLayer):
                 module.clip_parameters()
 
+    def set_absorbing(self):
+        """Switch all element layers to absorbing boundary conditions."""
+        for layer in self.element_layers.values():
+            layer.absorbing = True
+
+    def set_reflecting(self):
+        """Switch all element layers back to reflecting boundary conditions and clear absorbed state."""
+        for layer in self.element_layers.values():
+            layer.absorbing = False
+            layer.absorb_mask.fill_(True)
+
     def set_inputs(self, *node_groups):
         """
         Set which nodes will have clamped (fixed) voltages during simulation.
@@ -582,7 +593,7 @@ class CircuitModel(nn.Module):
             self.DelT = self.Del_dense.t()
 
 
-    def clamp(self, *tensors):
+    def clamp(self, *tensors, V_free_init=None):
         """
         Set voltages for clamped nodes from input tensors.
         
@@ -628,8 +639,10 @@ class CircuitModel(nn.Module):
         # Initialize free node voltages
         n_free = len(self.free_inds)
         self.V_free = tc.zeros((self.N_batch, n_free), dtype=self.dtype, device=self.device, requires_grad=True)
+        # if V_free_init is not None:
+        #     self.V_free.values = V_free_init.clone()
 
-    def forward(self, *tensors):
+    def forward(self, *tensors, V_free_init=None):
         """
         Forward pass: solve circuit equilibrium for given input voltages.
         
@@ -653,7 +666,7 @@ class CircuitModel(nn.Module):
         """
         
         # set input values for batch
-        self.clamp(*tensors)
+        self.clamp(*tensors, V_free_init=V_free_init)
 
         # Check if all nodes are constrained (no free nodes)
         if len(self.free_inds) == 0:
@@ -697,6 +710,59 @@ class CircuitModel(nn.Module):
         obj_history = np.array([a.cpu().detach().numpy() for a in obj_history])
         return self.V_node(), obj_history
     
+    def forward_track_voltage(self, *tensors, V_free_init=None):
+        self.clamp(*tensors, V_free_init=V_free_init)
+        
+        if V_free_init is not None:
+            self.V_free.values = V_free_init.clone()
+
+        # Check if all nodes are constrained (no free nodes)
+        if len(self.free_inds) == 0:
+            # All nodes are clamped - no optimization needed
+            # Return current node voltages and empty history
+            return self.V_node(), np.array([])
+
+        # get objective function
+        objective = self.physical_objective
+
+        # get optimizer based on configuration
+        if self.optimizer_type.lower() == 'lbfgs':
+            optimizer = tc.optim.LBFGS([self.V_free], lr=self.optim_lr)
+        elif self.optimizer_type.lower() == 'adam':
+            optimizer = tc.optim.Adam([self.V_free], lr=self.optim_lr)
+        else:
+            raise ValueError(f"Unsupported optimizer type: {self.optimizer_type}. Supported types: 'adam', 'lbfgs'")
+
+        # carry out minimization
+        obj_history = []
+        V_history = []
+
+        if self.optimizer_type.lower() == 'lbfgs':
+            # L-BFGS requires a closure function
+            def closure():
+                optimizer.zero_grad()
+                loss = objective()
+                loss.backward()
+                return loss
+
+            for n in range(self.N_optim_steps):
+                loss = optimizer.step(closure)
+                obj_history.append(loss)
+                V_history.append(self.V_node())
+        else:
+            for n in range(self.N_optim_steps):
+                optimizer.zero_grad()
+                cur_obj = objective()
+                cur_obj.backward()
+                obj_history.append(cur_obj)
+                V_history.append(self.V_node())
+                optimizer.step()
+        
+        obj_history = np.array([a.cpu().detach().numpy() for a in obj_history])
+        V_history = np.array([a.cpu().detach().numpy() for a in V_history])
+        return V_history, obj_history
+
+
     def V_node(self):
         """
         Combine clamped and free node voltages into a single tensor.
@@ -964,7 +1030,7 @@ class ElementLayer(nn.Module):
             lr = tc.ones(self.N_params, 1, dtype=tc.float32)
         else:
             lr = tc.zeros(self.N_params, 1, dtype=tc.float32)
-        self.register_buffer('learning_rates', lr)
+        self.register_buffer('_learning_rates', lr)
 
         # Add parameters (e.g. conductance)
         param_shape = (self.N_params, self.N_edges)
@@ -974,6 +1040,11 @@ class ElementLayer(nn.Module):
         initial_values = self._initialize_parameters(param_shape)
         self.theta = Parameter(initial_values, requires_grad=trainable)
         self.register_buffer('theta_init', initial_values.clone())
+
+        # Absorbing boundary conditions: when a parameter hits a limit it is frozen there.
+        # absorb_mask has the same shape as theta; False entries silence the learning rate.
+        self.absorbing = False
+        self.register_buffer('absorb_mask', tc.ones(param_shape, dtype=tc.bool))
 
     def _initialize_parameters(self, shape):
         """
@@ -1057,10 +1128,18 @@ class ElementLayer(nn.Module):
 
         return values
     
+    @property
+    def learning_rates(self):
+        """Effective learning rates, zeroed out for any parameter that has absorbed."""
+        if self.absorbing:
+            return self._learning_rates * self.absorb_mask
+        return self._learning_rates
+
     def reset(self):
         """Restore parameters to their initial values (as set at construction time)."""
         with tc.no_grad():
             self.theta.data.copy_(self.theta_init)
+            self.absorb_mask.fill_(True)
 
     def set_parameters(self, theta):
         self.theta.data = tc.tensor(theta)
@@ -1082,8 +1161,10 @@ class ElementLayer(nn.Module):
             for i, (min_val, max_val) in enumerate(self.element.param_ranges):
                 if min_val is not None:
                     self.theta[i].clamp_(min=min_val)
+                    self.absorb_mask[i] &= (not self.absorbing) | (self.theta[i] > min_val)
                 if max_val is not None:
                     self.theta[i].clamp_(max=max_val)
+                    self.absorb_mask[i] &= (not self.absorbing) | (self.theta[i] < max_val)
 
     def forward(self, x):
         """
