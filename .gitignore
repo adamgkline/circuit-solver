@@ -7,3 +7,4 @@ requirements_verbose.txt
 dev
 saved/
 graphics
+circuit_solver/examples/development
