@@ -104,7 +104,9 @@ V_node, _ = model(x, y)
 - **`CLTrainingConfig`** (and per-rule variants) — learning settings:
   `batch_size`, `N_epochs` *or* `N_batches`, `eta` (nudge strength), `alpha`
   (learning rate), `clamp_method` (`'MSE'`, `'overclamping'`, `'cross_entropy'`,
-  …).
+  …), and `parameter_update_method` (`None`/`'sgd'` applies raw learning-rule
+  steps; `'adam'` preconditions them with Adam, configured via
+  `adam_config=AdamConfig(lr=...)`).
 - **Elements** carry `param_ranges` (parameters are clamped to these each step),
   `init_mode` (`'geometric_mean'`, `'constant'`, `'uniform'`, `'normal'`), and
   per-parameter `learning_rates`.
@@ -120,7 +122,7 @@ trained model.
 ## Status / caveats
 
 Research code under active development. Some experimental branches are
-incomplete: `adam_update` in `learning.py` and `generate_layer_graph` in
-`utils.py` reference undefined names and will error if called;
-`hinge_clamping` and `distance_classification_accuracy` are stubs. The actively
+incomplete: `generate_layer_graph` in `utils.py` references undefined names
+and will error if called; `hinge_clamping` and
+`distance_classification_accuracy` are stubs. The actively
 used paths listed above work. See `CLAUDE.md` for a deeper map.

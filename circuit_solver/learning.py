@@ -9,15 +9,25 @@ from circuit_solver import utils
 
 
 @dataclass
+class AdamConfig:
+    """Configuration for the Adam parameter update method"""
+    lr : float = 0.01     # step size of the Adam-conditioned update
+    beta1 : float = 0.9   # first-moment (momentum) decay rate
+    beta2 : float = 0.999 # second-moment decay rate
+    eps : float = 1E-6    # numerical stabilizer
+
+
+@dataclass
 class BaseTrainingConfig:
     """Base configuration class with common validation logic"""
-    x_nodes: str = 'x'  
+    x_nodes: str = 'x'
     y_nodes: str = 'y'
     batch_size: int = 100
     N_epochs: Optional[int] = None
     N_batches: Optional[int] = None
     clamp_method: str = 'MSE'
-    parameter_update_method: Optional[str] = None
+    parameter_update_method: Optional[str] = None   # None/'sgd' applies raw steps; 'adam' preconditions them
+    adam_config: Optional[AdamConfig] = None        # used when parameter_update_method == 'adam'
     softmax_temp: float = 1.
     overclamp_gain: float = 200
 
@@ -89,7 +99,8 @@ def argmax_classification_accuracy(y, y_free):
 
 def extract_training_params(**params):
     """Extract training parameters from kwargs for config creation"""
-    valid_keys = {'x_nodes', 'y_nodes', 'batch_size', 'N_epochs', 'N_batches', 'eta', 'alpha', 'nu'}
+    valid_keys = {'x_nodes', 'y_nodes', 'batch_size', 'N_epochs', 'N_batches', 'eta', 'alpha', 'nu',
+                  'clamp_method', 'parameter_update_method', 'adam_config'}
     return {k: v for k, v in params.items() if k in valid_keys}
 
 def convert_to_tensors(X, Y):
@@ -188,32 +199,80 @@ clamping_functions = {
 }
 
 ###### PARAMETER UPDATE METHODS
-@dataclass
-class AdamConfig:
-    beta1 : float = 0.9   
-    beta2 : float = 0.999 
-    eps : float = 1E-6    
 
-
-
-def adam_update(t, g, m, v, ucfg):
-    """
-    t: timestep
-    g: original update step
-    m:
-    """
-    # TODO: `beta1`, `beta2`, and `gamma` are undefined — should be `ucfg.beta1`,
-    # `ucfg.beta2`, and a learning rate passed in as an argument
-    m[t] = beta1 * m[t-1] + (1 - beta1) * g[t]        # BUG: beta1 not defined
-    v[t] = beta2 * v[t-1] + (1 - beta2) * g[t] ** 2   # BUG: beta2 not defined
-    m_hat = m[t] / (1 - ucfg.beta1 ** t)
-    v_hat = v[t] / (1 - ucfg.beta2 ** t)
-    d_theta = - gamma * m_hat / (tc.sqrt(v_hat) + ucfg.eps)  # BUG: gamma not defined
+def sgd_update(name, d_theta):
+    """Default parameter update: apply the raw learning-rule step directly."""
     return d_theta
 
-parameter_update_methods = {
-    'adam': adam_update
-}
+
+class AdamUpdater:
+    """
+    Stateful Adam preconditioner for learning-rule parameter updates.
+
+    Treats the raw step d_theta produced by a learning rule as a (descent-
+    direction) gradient estimate and returns an Adam-conditioned step. First
+    and second moment tensors are kept per element layer (keyed by layer name)
+    and lazily initialized to match the shape of the incoming step, i.e. the
+    shape of layer.theta.
+
+    Notes:
+    - Adam normalizes the magnitude of the raw step, so the size of the
+      applied update is set by AdamConfig.lr rather than cfg.alpha or the
+      element's per-parameter learning_rates (those still control sign and
+      which entries are zero).
+    - Parameters that have never received a nonzero step (e.g. learning rate
+      0) stay fixed. Parameters frozen mid-run (absorbing boundaries) may
+      receive small residual momentum steps, which clip_parameters clamps
+      back into range.
+
+    One instance should be created per training run (see
+    get_parameter_updater); reusing an instance across runs carries over
+    moment estimates and step counts.
+    """
+    def __init__(self, config=None):
+        self.cfg = config if config is not None else AdamConfig()
+        self.m = {}     # first moments, keyed by element layer name
+        self.v = {}     # second moments, keyed by element layer name
+        self.t = {}     # per-layer step counts, for bias correction
+
+    def __call__(self, name, d_theta):
+        cfg = self.cfg
+        g = d_theta.detach()
+
+        # Lazily initialize state to match this layer's theta shape
+        if name not in self.m:
+            self.m[name] = tc.zeros_like(g)
+            self.v[name] = tc.zeros_like(g)
+            self.t[name] = 0
+        self.t[name] += 1
+        t = self.t[name]
+
+        # Update biased moment estimates
+        self.m[name] = cfg.beta1 * self.m[name] + (1 - cfg.beta1) * g
+        self.v[name] = cfg.beta2 * self.v[name] + (1 - cfg.beta2) * g ** 2
+
+        # Bias-corrected estimates
+        m_hat = self.m[name] / (1 - cfg.beta1 ** t)
+        v_hat = self.v[name] / (1 - cfg.beta2 ** t)
+
+        # No leading minus sign: d_theta is already a descent step
+        return cfg.lr * m_hat / (tc.sqrt(v_hat) + cfg.eps)
+
+
+def get_parameter_updater(cfg):
+    """
+    Resolve cfg.parameter_update_method to a callable update(name, d_theta) -> step.
+
+    None or 'sgd' (default) applies raw learning-rule steps directly; 'adam'
+    returns a fresh stateful AdamUpdater configured by cfg.adam_config.
+    """
+    method = cfg.parameter_update_method
+    if method is None or method == 'sgd':
+        return sgd_update
+    elif method == 'adam':
+        return AdamUpdater(cfg.adam_config)
+    else:
+        raise ValueError(f"Unknown parameter_update_method '{method}'. Supported: None, 'sgd', 'adam'")
 
 # ============================================================================
 # Training Functions
@@ -257,7 +316,9 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
 
     def compute_d_theta(V_F, epsilon, layer):
         return - layer.learning_rates * cfg.alpha * tc.mean(V_F * epsilon, axis=0)
-        
+
+    update_step = get_parameter_updater(cfg)
+
     # Training loop
     for t in tqdm(range(N_batches)):
         # Sample batch
@@ -291,7 +352,7 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
             # theta = layer.theta.data
             # d_theta = compute_d_theta(V_F, V_C, layer)
             # layer.update_parameters(theta + d_theta)
-            layer.theta.data += compute_d_theta(V_F, cur_epsilon, layer)
+            layer.theta.data += update_step(element_name, compute_d_theta(V_F, cur_epsilon, layer))
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
@@ -349,9 +410,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
         # return layer.learning_rates * cfg.alpha / cfg.eta / 2 * tc.mean((V_F**2 - V_C**2), axis=0)
     
     compute_clamped_state = clamping_functions[cfg.clamp_method]
-    
-    # TODO: implement Adam update, need to initialize m and v tensors which match the shape of theta 
-    # parameter_update_method = parameter_update_methods[cfg.parameter_update_method]
+    update_step = get_parameter_updater(cfg)
 
     # Training loop
     for t in tqdm(range(N_batches)):
@@ -384,8 +443,8 @@ def CoupledLearning(X, Y, model, config=None, **params):
             V_F = V_edge_F[:, edge_inds]      
             V_C = V_edge_C[:, edge_inds]
 
-            # apply parameter gradients     # TODO: implement Adam update
-            layer.theta.data += compute_d_theta(V_F, V_C, layer)
+            # apply parameter gradients
+            layer.theta.data += update_step(element_name, compute_d_theta(V_F, V_C, layer))
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
@@ -443,9 +502,7 @@ def SymmetricCoupledLearning(X, Y, model, config=None, **params):
         # return layer.learning_rates * cfg.alpha / cfg.eta / 2 * tc.mean((V_F**2 - V_C**2), axis=0)
     
     compute_clamped_state = clamping_functions[cfg.clamp_method]
-    
-    # TODO: implement Adam update, need to initialize m and v tensors which match the shape of theta 
-    # parameter_update_method = parameter_update_methods[cfg.parameter_update_method]
+    update_step = get_parameter_updater(cfg)
 
     # Training loop
     for t in tqdm(range(N_batches)):
@@ -485,8 +542,8 @@ def SymmetricCoupledLearning(X, Y, model, config=None, **params):
             V_C_neg = V_edge_C_neg[:, edge_inds]      
             V_C_pos = V_edge_C_pos[:, edge_inds]
 
-            # apply parameter gradients     # TODO: implement Adam update
-            layer.theta.data += compute_d_theta(V_C_neg, V_C_pos, layer)
+            # apply parameter gradients
+            layer.theta.data += update_step(element_name, compute_d_theta(V_C_neg, V_C_pos, layer))
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())

@@ -99,14 +99,21 @@ clamped states they compute (symmetric uses ±; noise-contrastive adds per-class
 negative states). `eta` = clamp/nudge strength, `alpha` = learning rate, and
 `layer.learning_rates` is a per-parameter multiplier.
 
+**Parameter update methods**: `cfg.parameter_update_method` selects how the raw
+`compute_d_theta` step is applied — `None`/`'sgd'` adds it directly, `'adam'`
+preconditions it with a stateful `AdamUpdater` (per-layer moment tensors shaped
+like `theta`; step size set by `cfg.adam_config.lr`, since Adam normalizes away
+`alpha`). Wired into the three core rules (`CoupledLearning`,
+`CoupledLearningEtaZero`, `SymmetricCoupledLearning`) only. The functions below
+the "Experimental learning rule training functions" header are the author's
+scratch space — leave them alone unless explicitly asked to change them.
+
 `history[element_name]` is the parameter trajectory with shape
 `(N_params, N_batches+1, N_edges)` (note: **param, time, edge** — see
 `restore_model_to_t`). `finalize_history` stacks along `axis=1`.
 
 ## Known broken / stub code (don't call without fixing)
 
-- `learning.adam_update` — references `beta1`, `beta2`, `gamma` that are never
-  defined; Adam parameter updates are still a TODO. Marked with `# BUG` comments.
 - `utils.generate_layer_graph` — uses `coloring.greedy_color` but `coloring` is
   never imported (should be `nx.coloring.greedy_color`); also reads
   `circuit.graph` / `circuit.inputs` / `circuit.outputs` attributes that
@@ -114,8 +121,8 @@ negative states). `eta` = clamp/nudge strength, `alpha` = learning rate, and
 - `learning.hinge_clamping`, `learning.constant_clamping`,
   `learning.distance_classification_accuracy` — empty stubs (return `None`).
 
-These are annotated inline with `# TODO`/`# BUG`. If asked to work on Adam,
-layer-graph, or hinge loss, these are the starting points.
+These are annotated inline with `# TODO`/`# BUG`. If asked to work on
+layer-graph or hinge loss, these are the starting points.
 
 ## Repo layout notes
 
