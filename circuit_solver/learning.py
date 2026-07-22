@@ -133,8 +133,9 @@ def initialize_param_history(model):
     for element in model.circuit.elements:
         name = element.name
         layer = model.element_layers[name]
-        init_values = layer.theta.data.clone().detach().numpy()
-        param_history[name] = [init_values]
+        init_values = layer.theta.data.cpu().clone().detach().numpy()
+        param_history[name] = [init_values]    
+    
     return param_history
 
 def finalize_history(param_history, loss, accuracy):
@@ -356,7 +357,7 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
-            param_history[element_name].append(layer.theta.data.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
         loss_batch = loss_function(y, y_F) / cfg.batch_size
@@ -448,7 +449,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
-            param_history[element_name].append(layer.theta.data.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
         loss_batch = loss_function(y, y_F) / cfg.batch_size
@@ -547,7 +548,7 @@ def SymmetricCoupledLearning(X, Y, model, config=None, **params):
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
-            param_history[element_name].append(layer.theta.data.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
         loss_batch = loss_function(y, y_F) / cfg.batch_size
@@ -724,7 +725,7 @@ def GeoCoupledLearning(X, Y, model, config=None, **params):
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
-            param_history[element_name].append(layer.theta.data.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
         loss_batch = loss_function(y, y_F) / cfg.batch_size
@@ -806,7 +807,7 @@ def AdjointLearning(X, Y, model, config=None, **params):
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
-            param_history[element_name].append(layer.theta.data.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
         loss_batch = loss_function(y, y_F) / cfg.batch_size
@@ -892,7 +893,7 @@ def InvariantLearning(X, Y, model, config=None, **params):
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
-            param_history[element_name].append(layer.theta.data.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
         loss_batch = loss_function(y, y_F) / cfg.batch_size
@@ -1001,7 +1002,7 @@ def NCCoupledLearning(X, Y, model, config=None, **params):
             layer.clip_parameters()         # enforce limits on model parameter ranges
             
             # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
-            param_history[element_name].append(layer.theta.data.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
         loss_batch = loss_function(y, y_f) / cfg.batch_size
