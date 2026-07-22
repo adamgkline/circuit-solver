@@ -290,6 +290,7 @@ class CircuitModel(nn.Module):
 
         # set device
         self.device = tc.accelerator.current_accelerator().type if tc.accelerator.is_available() and cfg.use_gpu else "cpu"   # "mps" for mac, typically "cuda" elsewhere
+        self.use_gpu = cfg.use_gpu
 
         ## Initialize everything needed for input structure
         # initialize clamped and free node lists
