@@ -197,13 +197,19 @@ class CircuitModel(nn.Module):
     
     Args:
         circuit (Circuit): Circuit topology and element information
-        node_type_dict (dict): Maps node types to node indices
+        node_type_dict (dict): Maps node type names to lists of graph nodes -- the node
+                              objects of the underlying nx.DiGraph, NOT positional indices
+                              into list(circuit.nodes()). The two coincide only when the
+                              graph happens to be labelled 0..N-1 in insertion order;
+                              relabelling or composing graphs breaks that silently. Use
+                              utils.nodes_to_inds(nodes, circuit) to convert nodes to
+                              positional indices.
                               Special types: 'GROUND', 'HIGH', 'LOW' for reference voltages
         config (CircuitModelConfig, optional): Configuration parameters
     
     Attributes:
         circuit (Circuit): The underlying circuit
-        node_type_dict (dict): Node type mappings
+        node_type_dict (dict): Maps node type names to lists of graph nodes (not indices)
         element_layers (dict): Shared ElementLayer instances by element name
         rho (nn.Sequential): Cocontent function module
         gamma (nn.Sequential): Current function module  
@@ -218,7 +224,8 @@ class CircuitModel(nn.Module):
     
     Example:
         >>> config = CircuitModelConfig(N_optim_steps=50, optim_lr=0.01)
-        >>> node_types = {'GROUND': [0], 'x_nodes': [1,2,3]}
+        >>> # values are graph nodes, i.e. keys of circuit.nodes(), not positions
+        >>> node_types = {'GROUND': [0], 'x_nodes': [1, 2, 3]}
         >>> model = CircuitModel(circuit, node_types, config)
         >>> x_input = torch.randn(10, 3)  # batch_size=10, 3 input nodes
         >>> voltages, obj_history = model(x_input)
@@ -230,7 +237,9 @@ class CircuitModel(nn.Module):
         
         Args:
             circuit (Circuit): Circuit topology and element information
-            node_type_dict (dict): Maps node type names to lists of node indices
+            node_type_dict (dict): Maps node type names to lists of graph nodes (the node
+                objects of the underlying nx.DiGraph, not positional indices into
+                list(circuit.nodes()); convert with utils.nodes_to_inds)
             config (CircuitModelConfig, optional): Model configuration parameters
         """
         
@@ -503,11 +512,14 @@ class CircuitModel(nn.Module):
         - Free nodes: All other nodes whose voltages will be optimized
 
         Args:
-            *node_inds: Variable number of iterables containing node indices to clamp,
-                       OR string keys from node_type_dict
+            *node_groups: Variable number of iterables containing graph nodes to clamp
+                       (node objects of the underlying nx.DiGraph, not positional indices
+                       into list(circuit.nodes())), OR string keys from node_type_dict.
+                       The positional indices are derived from these via
+                       utils.nodes_to_inds and stored in clamped_inds / free_inds.
 
         Example:
-            >>> x_nodes = [1, 2, 3, 4]
+            >>> x_nodes = [1, 2, 3, 4]   # graph nodes, not positions in circuit.nodes()
             >>> y_nodes = [5, 6, 7]
             >>> model.set_inputs(x_nodes)  # Only clamp x_nodes
             >>> model.set_inputs(x_nodes, y_nodes)  # Clamp both x_nodes and y_nodes
@@ -1146,7 +1158,7 @@ class ElementLayer(nn.Module):
         self.theta.data = tc.tensor(theta)
         self.clip_parameters()
 
-    def clip_parameters(self):
+    def clip_parameters(self):  
         """
         Clip parameters to their allowed ranges based on element.param_ranges.
         
@@ -1162,7 +1174,10 @@ class ElementLayer(nn.Module):
             for i, (min_val, max_val) in enumerate(self.element.param_ranges):
                 if min_val is not None:
                     self.theta[i].clamp_(min=min_val)
-                    self.absorb_mask[i] &= (not self.absorbing) | (self.theta[i] > min_val)
+                    self.absorb_mask[i] &= (not self.absorbing) | (self.theta[i] > min_val) 
+                    # TODO: model.restore_model_to_t fails here when model_config.use_gpu=True. We get: 
+                    #   "RuntimeError: Expected all tensors to be on the same device, but found at least two devices, mps:0 and cpu!"
+                    # Somehow the layer.theta tensor gets placed on cpu.
                 if max_val is not None:
                     self.theta[i].clamp_(max=max_val)
                     self.absorb_mask[i] &= (not self.absorbing) | (self.theta[i] < max_val)

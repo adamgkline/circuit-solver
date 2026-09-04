@@ -61,10 +61,12 @@ learning rules update `layer.theta.data` in place, outside the autograd graph.
   physical objective → return `(V_node, obj_history)`. `V_free` is re-zeroed
   every `clamp()` call, so each solve starts from scratch (no warm start).
 - **`set_inputs(*groups)`** decides which nodes are clamped vs. free. Reference
-  nodes (`GROUND`/`HIGH`/`LOW`) are *always* clamped. Accepts either node-index
-  lists or string keys into `node_type_dict`. Must be called before a solve to
-  select the phase (free = inputs only; clamped = inputs + outputs). It rebuilds
-  `Del_clamped`/`Del_free`.
+  nodes (`GROUND`/`HIGH`/`LOW`) are *always* clamped. Accepts either lists of
+  *node labels* or string keys into `node_type_dict`. Must be called before a
+  solve to select the phase (free = inputs only; clamped = inputs + outputs). It
+  rebuilds `Del_clamped`/`Del_free`. Note `node_type_dict` values are node labels,
+  not positional indices; `set_inputs` derives `clamped_inds`/`free_inds` from
+  them via `utils.nodes_to_inds`.
 - **Two physical objectives** (`mode`): `'cocontent'` (default; minimize summed
   `rho`) and `'current'` (minimize squared node current = enforce KCL). They
   should agree at equilibrium; cocontent is the smoother objective.

@@ -67,7 +67,8 @@ element = es.Resistor()                 # a trainable linear conductance
 element_dict = {element: all_edges}     # {element: [edges where it lives]}
 circuit = ct.Circuit(graph, element_dict)
 
-# 3. Tell the model which node-index lists are which role.
+# 3. Tell the model which node lists are which role. Values are graph nodes
+#    (labels in the DiGraph), not positional indices into list(circuit.nodes()).
 node_type_dict = {
     'GROUND': GROUND, 'HIGH': HIGH, 'LOW': LOW,
     'x': x_nodes, 'y': y_nodes,
