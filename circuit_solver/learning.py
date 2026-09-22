@@ -3,7 +3,7 @@ import torch as tc
 import random
 import warnings
 from tqdm import tqdm
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Optional, Dict, Any
 from circuit_solver import utils
 
@@ -30,6 +30,8 @@ class BaseTrainingConfig:
     adam_config: Optional[AdamConfig] = None        # used when parameter_update_method == 'adam'
     softmax_temp: float = 1.
     overclamp_gain: float = 200
+    loss: str = 'MSE'       # key into loss_functions
+    kappa: float = 0.0      # margin for the hinge loss / clamping
 
     def __post_init__(self):
         """Validate that either N_epochs or N_batches is provided, but warn if both are given"""
@@ -81,14 +83,83 @@ class NCCLTrainingConfig(BaseTrainingConfig):
     alpha: float = 1.0
     nu: float = 1.0
 
+@dataclass
+class GDTrainingConfig(BaseTrainingConfig):
+    """Configuration for exact gradient descent training
+
+    alpha             : learning rate multiplying the loss gradient
+    reg               : ridge added to the adjoint (Hessian) matrix before solving.
+                        Raise it if elements saturate to zero differential
+                        conductance (e.g. reverse-biased ideal diodes), which
+                        makes the adjoint circuit singular.
+    solve_chunk_size  : split the batch into chunks of this size when building
+                        and solving the adjoint system. The system is
+                        (batch, N_free, N_free), so chunking bounds memory on
+                        large circuits. None means the whole batch at once.
+    """
+    alpha: float = 1.0
+    reg: float = 1E-6
+    solve_chunk_size: Optional[int] = None
+
 
 # ============================================================================
 # Utility Functions
 # ============================================================================
 
-def loss_function(y, y_free):
+def mse_loss(y, y_free, cfg=None):
     """Compute MSE loss between target and prediction"""
     return tc.sum((y - y_free)**2)
+
+def hinge_margin_mask(y, y_free, cfg):
+    """True where an output has NOT met the margin, i.e. where the loss acts.
+
+    Assumes signed targets (y < 0 / y > 0 encode the two classes), so that the
+    margin y * y_free is positive exactly when y_free is on the correct side.
+    An output is penalized while y * y_free < kappa.
+    """
+    return y * y_free < cfg.kappa
+
+def hinge_loss(y, y_free, cfg):
+    """Squared error, counted only on outputs that violate the margin."""
+    return tc.sum((y - y_free)**2 * hinge_margin_mask(y, y_free, cfg))
+
+loss_functions = {
+    'MSE' : mse_loss,
+    'hinge' : hinge_loss
+}
+
+def mse_loss_grad(y, y_free, cfg=None):
+    """dL/dy_free for mse_loss."""
+    return 2 * (y_free - y)
+
+def hinge_loss_grad(y, y_free, cfg):
+    """dL/dy_free for hinge_loss.
+
+    The margin indicator is piecewise constant, so it contributes nothing to the
+    derivative except on the switching surface itself. Holding it fixed is the
+    usual subgradient treatment, and makes this the exact gradient of the loss
+    everywhere off that surface.
+    """
+    return 2 * (y_free - y) * hinge_margin_mask(y, y_free, cfg)
+
+# dL/dy_free for each loss. Only needed by rules that differentiate the loss
+# directly (GradientDescent); the coupled-learning family instead encodes the
+# loss through its clamping function.
+loss_gradients = {
+    'MSE' : mse_loss_grad,
+    'hinge' : hinge_loss_grad,
+}
+
+def get_loss_gradient(cfg):
+    """Look up dL/dy_free for cfg.loss, with a pointed error if it is missing."""
+    try:
+        return loss_gradients[cfg.loss]
+    except KeyError:
+        raise ValueError(
+            f"No loss gradient registered for loss '{cfg.loss}'. Rules that "
+            f"differentiate the loss (e.g. GradientDescent) need an entry in "
+            f"loss_gradients; available: {sorted(loss_gradients)}."
+        ) from None
 
 def distance_classification_accuracy(y, y_free):
     ...
@@ -97,10 +168,20 @@ def argmax_classification_accuracy(y, y_free):
     """Compute classification accuracy based on argmax"""
     return tc.sum(tc.argmax(y_free, axis=1) == tc.argmax(y, axis=1))
 
-def extract_training_params(**params):
-    """Extract training parameters from kwargs for config creation"""
-    valid_keys = {'x_nodes', 'y_nodes', 'batch_size', 'N_epochs', 'N_batches', 'eta', 'alpha', 'nu',
-                  'clamp_method', 'parameter_update_method', 'adam_config'}
+def extract_training_params(config_cls=None, **params):
+    """Extract training parameters from kwargs for config creation
+
+    Args:
+        config_cls: optional training config dataclass. When given, the accepted
+            keys are exactly that class's fields, so configs with extra
+            parameters (e.g. GDTrainingConfig.reg) can be built from kwargs.
+            When omitted, a fixed default whitelist is used.
+    """
+    if config_cls is not None:
+        valid_keys = {f.name for f in fields(config_cls)}
+    else:
+        valid_keys = {'x_nodes', 'y_nodes', 'batch_size', 'N_epochs', 'N_batches', 'eta', 'alpha', 'nu',
+                      'clamp_method', 'parameter_update_method', 'adam_config', 'loss', 'kappa'}
     return {k: v for k, v in params.items() if k in valid_keys}
 
 def convert_to_tensors(X, Y):
@@ -158,10 +239,17 @@ def mse_clamping(y, y_F, cfg):
 def overclamping(y, y_F, cfg):
     return (1 - cfg.eta) * y_F + cfg.eta * cfg.overclamp_gain * tc.sign(y - y_F)
 
+def hinge_clamping(y, y_F, cfg):
+    """MSE clamping applied only to outputs that violate the margin.
 
-def mse_symmetric_clamping(y, y_F, cfg):
-    return cfg.eta * y + (1 - cfg.eta) * y_F
+    Outputs that already meet the margin are left at their free values, so they
+    contribute nothing to the coupled-learning update. 
+    """
+    mask = hinge_margin_mask(y, y_F, cfg)
+    return tc.where(mask, cfg.eta * y + (1 - cfg.eta) * y_F, y_F)
 
+# def mse_symmetric_clamping(y, y_F, cfg):
+    # return cfg.eta * y + (1 - cfg.eta) * y_F
 
 def constant_clamping(y, y_F, eta):
     pass
@@ -185,18 +273,15 @@ def ce_natural_clamping(y, y_F, cfg):
     p = softmax(y * 10E8) # this is hacky and bad, I know... Ideally I'd just pass in 1-hot vectors p but this would require some complicated stuff elsewhere
     return y_F + cfg.eta * T / q * (p - q)
 
-def hinge_clamping(y, y_F, eta):
-    # TODO: stub — returns None, which will crash downstream when used as a clamped state
-    pass
 
 clamping_functions = {
     'overclamping': overclamping,
     'MSE' : mse_clamping,
-    'MSE_symmetric' : mse_symmetric_clamping,
+    'hinge': hinge_clamping,
+    # 'MSE_symmetric' : mse_symmetric_clamping,
     'cross_entropy' : ce_natural_clamping,
     'cross_entropy_natural' : ce_natural_clamping,
     'cross_entropy_legacy' : ce_legacy_clamping,
-    'hinge': hinge_clamping,
 }
 
 ###### PARAMETER UPDATE METHODS
@@ -318,6 +403,7 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
     def compute_d_theta(V_F, epsilon, layer):
         return - layer.learning_rates * cfg.alpha * tc.mean(V_F * epsilon, axis=0)
 
+    compute_loss_function = loss_functions[cfg.loss]
     update_step = get_parameter_updater(cfg)
 
     # Training loop
@@ -360,7 +446,7 @@ def CoupledLearningEtaZero(X, Y, model, config=None, **params):
             param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
-        loss_batch = loss_function(y, y_F) / cfg.batch_size
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
         accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
         loss[t] = loss_batch.detach()
         accuracy[t] = accuracy_batch.detach()
@@ -410,6 +496,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
         return layer.learning_rates * cfg.alpha / cfg.eta * tc.mean((grad_rho_F - grad_rho_C), axis=0)
         # return layer.learning_rates * cfg.alpha / cfg.eta / 2 * tc.mean((V_F**2 - V_C**2), axis=0)
     
+    compute_loss_function = loss_functions[cfg.loss]
     compute_clamped_state = clamping_functions[cfg.clamp_method]
     update_step = get_parameter_updater(cfg)
 
@@ -452,7 +539,7 @@ def CoupledLearning(X, Y, model, config=None, **params):
             param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
-        loss_batch = loss_function(y, y_F) / cfg.batch_size
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
         accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
         loss[t] = loss_batch.detach()
         accuracy[t] = accuracy_batch.detach()
@@ -502,6 +589,7 @@ def SymmetricCoupledLearning(X, Y, model, config=None, **params):
         return layer.learning_rates * cfg.alpha / (2 * cfg.eta) * tc.mean((grad_rho_C_neg - grad_rho_C_pos), axis=0)
         # return layer.learning_rates * cfg.alpha / cfg.eta / 2 * tc.mean((V_F**2 - V_C**2), axis=0)
     
+    compute_loss_function = loss_functions[cfg.loss]
     compute_clamped_state = clamping_functions[cfg.clamp_method]
     update_step = get_parameter_updater(cfg)
 
@@ -551,7 +639,363 @@ def SymmetricCoupledLearning(X, Y, model, config=None, **params):
             param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
-        loss_batch = loss_function(y, y_F) / cfg.batch_size
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
+        accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
+        loss[t] = loss_batch.detach()
+        accuracy[t] = accuracy_batch.detach()
+
+    return finalize_history(param_history, loss, accuracy)
+
+
+def NaiveCoupledLearning(X, Y, model, config=None, **params):
+    """
+    X is a (P, N) ndarray, N-dim input features for P samples
+    Y is a (P, M) ndarray, M-dim output targets for P samples
+    model is a CircuitModel object
+    config is a CLTrainingConfig object, or parameters can be passed as kwargs
+    """
+    # Handle configuration
+    if config is not None:
+        if isinstance(config, CLTrainingConfig):
+            cfg = config
+        else:
+            raise TypeError("config must be a CLTrainingConfig object")
+    else:
+        param_dict = extract_training_params(**params)
+        cfg = CLTrainingConfig(**param_dict)
+
+    # Convert and validate data
+    X, Y = convert_to_tensors(X, Y)
+    P, N, M = validate_data_shapes(X, Y)
+
+    # Setup
+    N_edges = model.circuit.number_of_edges()
+    batches_per_epoch = P // cfg.batch_size
+    N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
+
+    # Resolve node indices
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
+
+    # Initialize tracking arrays
+    param_history = initialize_param_history(model)
+    loss = np.zeros(N_batches)
+    accuracy = np.zeros(N_batches)
+
+    def compute_d_theta(V_F, V_C, layer):
+        return layer.learning_rates * cfg.alpha / cfg.eta / 2 * tc.mean((V_F**2 - V_C**2), axis=0)
+    
+    compute_loss_function = loss_functions[cfg.loss]
+    compute_clamped_state = clamping_functions[cfg.clamp_method]
+    update_step = get_parameter_updater(cfg)
+
+    # Training loop
+    for t in tqdm(range(N_batches)):
+        # Sample batch
+        batch_inds = random.sample(range(P), cfg.batch_size)
+        x = X[batch_inds]
+        y = Y[batch_inds]
+
+        # Ensure tensors are on correct device and dtype
+        x = x.to(dtype=model.dtype, device=model.device)
+        y = y.to(dtype=model.dtype, device=model.device)
+
+        # Compute free and clamped states
+        model.set_inputs(x_nodes)
+        V_node_F, _ = model(x)
+        y_F = V_node_F[:, y_inds]
+        V_edge_F = model.V_edge() 
+
+        # Compute clamped state
+        y_C = compute_clamped_state(y, y_F.detach(), cfg)
+        # y_C = cfg.eta * y + (1 - cfg.eta) * y_F.detach()
+
+        model.set_inputs(x_nodes, y_nodes)
+        _ = model(x, y_C)
+        V_edge_C = model.V_edge()
+        
+        # update parameters and history
+        for element_name, layer in model.element_layers.items():
+            edge_inds = model.element_to_inds[element_name]
+            V_F = V_edge_F[:, edge_inds]      
+            V_C = V_edge_C[:, edge_inds]
+
+            # apply parameter gradients
+            layer.theta.data += update_step(element_name, compute_d_theta(V_F, V_C, layer))
+            layer.clip_parameters()         # enforce limits on model parameter ranges
+            
+            # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
+
+        # record performance on batch
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
+        accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
+        loss[t] = loss_batch.detach()
+        accuracy[t] = accuracy_batch.detach()
+
+    return finalize_history(param_history, loss, accuracy)
+
+
+def NaiveSymmetricCoupledLearning(X, Y, model, config=None, **params):
+    """
+    X is a (P, N) ndarray, N-dim input features for P samples
+    Y is a (P, M) ndarray, M-dim output targets for P samples
+    model is a CircuitModel object
+    config is a CLTrainingConfig object, or parameters can be passed as kwargs
+    """
+    # Handle configuration
+    if config is not None:
+        if isinstance(config, CLTrainingConfig):
+            cfg = config
+        else:
+            raise TypeError("config must be a CLTrainingConfig object")
+    else:
+        param_dict = extract_training_params(**params)
+        cfg = CLTrainingConfig(**param_dict)
+
+    # Convert and validate data
+    X, Y = convert_to_tensors(X, Y)
+    P, N, M = validate_data_shapes(X, Y)
+
+    # Setup
+    N_edges = model.circuit.number_of_edges()
+    batches_per_epoch = P // cfg.batch_size
+    N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
+
+    # Resolve node indices
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
+
+    # Initialize tracking arrays
+    param_history = initialize_param_history(model)
+    loss = np.zeros(N_batches)
+    accuracy = np.zeros(N_batches)
+
+    def compute_d_theta(V_C_neg, V_C_pos, layer):
+        return layer.learning_rates * cfg.alpha / cfg.eta / 4 * tc.mean((V_C_neg**2 - V_C_pos**2), axis=0)
+    
+    compute_loss_function = loss_functions[cfg.loss]
+    compute_clamped_state = clamping_functions[cfg.clamp_method]
+    update_step = get_parameter_updater(cfg)
+
+    # Training loop
+    for t in tqdm(range(N_batches)):
+        # Sample batch
+        batch_inds = random.sample(range(P), cfg.batch_size)
+        x = X[batch_inds]
+        y = Y[batch_inds]
+
+        # Ensure tensors are on correct device and dtype
+        x = x.to(dtype=model.dtype, device=model.device)
+        y = y.to(dtype=model.dtype, device=model.device)
+
+        # Compute free and clamped states
+        model.set_inputs(x_nodes)
+        V_node_F, _ = model(x)
+        y_F = V_node_F[:, y_inds]
+        V_edge_F = model.V_edge() 
+
+        # Compute clamp states for outputs
+        y_Fd = y_F.detach()
+        y_C_pos = compute_clamped_state(y, y_Fd, cfg)        
+        y_C_neg = y_Fd - (y_C_pos - y_Fd) # negative clamp
+
+        # y_C_pos = compute_clamped_state(y, y_F.detach(), cfg)        
+        # y_C_neg = y_F.detach() - (y_C_pos - y_F.detach()) # negative clamp
+
+        # Compute clamped states for network
+        model.set_inputs(x_nodes, y_nodes)
+        _ = model(x, y_C_pos)
+        V_edge_C_pos = model.V_edge()
+        _ = model(x, y_C_neg)
+        V_edge_C_neg = model.V_edge()
+        
+        # update parameters and history
+        for element_name, layer in model.element_layers.items():
+            edge_inds = model.element_to_inds[element_name]
+            V_C_neg = V_edge_C_neg[:, edge_inds]      
+            V_C_pos = V_edge_C_pos[:, edge_inds]
+
+            # apply parameter gradients
+            layer.theta.data += update_step(element_name, compute_d_theta(V_C_neg, V_C_pos, layer))
+            layer.clip_parameters()         # enforce limits on model parameter ranges
+            
+            # param_history[element + '_step'].append(d_theta.clone().detach().numpy())
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
+
+        # record performance on batch
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
+        accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
+        loss[t] = loss_batch.detach()
+        accuracy[t] = accuracy_batch.detach()
+
+    return finalize_history(param_history, loss, accuracy)
+
+
+def GradientDescent(X, Y, model, config=None, **params):
+    """
+    Exact gradient descent on a loss of the free-phase equilibrium.
+
+    The loss is chosen by cfg.loss ('MSE', 'hinge', ...). Unlike the
+    coupled-learning rules -- where the loss enters through cfg.clamp_method and
+    cfg.loss only changes what is logged -- here cfg.loss drives the update
+    itself, via the dL/dy_free term injected into the adjoint solve. Each loss
+    therefore needs an entry in loss_gradients as well as loss_functions.
+
+    X is a (P, N) ndarray, N-dim input features for P samples
+    Y is a (P, M) ndarray, M-dim output targets for P samples
+    model is a CircuitModel object
+    config is a GDTrainingConfig object, or parameters can be passed as kwargs
+
+    Unlike the coupled-learning family, this rule is *not* local and not
+    physically realizable: it computes the true dL/dtheta and steps against it.
+    It exists as the reference baseline those local rules are approximating.
+
+    The gradient cannot be obtained by backprop through model.forward (the inner
+    LBFGS/Adam relaxation steps V_free in place, outside the autograd graph), so
+    it is computed by implicit differentiation of the equilibrium condition,
+    which is the standard adjoint method:
+
+        equilibrium   F(V_free, theta) = dE/dV_free = -A^T gamma(V_edge) = 0
+                      with A = Del_free and V_edge = -(A V_free + Del_clamped V_clamped)
+        adjoint solve H lambda = dL/dV_free,  H = A^T diag(gamma'(V_edge)) A
+        gradient      dL/dtheta[p,e] = (A lambda)[e] * d gamma[e] / d theta[p,e]
+
+    H is the Hessian of the circuit's physical objective in the free voltages,
+    i.e. the conductance matrix of the linearized ("adjoint") circuit, and
+    lambda is that circuit's node voltage response to injecting dL/dV_free at
+    the output nodes (2 (y_F - y) for MSE, masked to the margin violators for
+    hinge). Only the free phase is solved; the clamped phase of coupled learning
+    is replaced by this linear solve.
+
+    Cost: builds a (batch, N_free, N_free) system per batch. Use
+    cfg.solve_chunk_size to bound the memory on large circuits, and cfg.reg to
+    regularize the solve when elements saturate to zero differential
+    conductance.
+
+    Accuracy: the gradient is exact at the true equilibrium, so it is only as
+    good as the free-phase solve. With the default CircuitModelConfig
+    (LBFGS, N_optim_steps=3) the residual current on free nodes sets the floor;
+    raise N_optim_steps if the gradient matters more than the wall clock.
+    """
+    # Handle configuration
+    if config is not None:
+        if isinstance(config, GDTrainingConfig):
+            cfg = config
+        else:
+            raise TypeError("config must be a GDTrainingConfig object")
+    else:
+        param_dict = extract_training_params(config_cls=GDTrainingConfig, **params)
+        cfg = GDTrainingConfig(**param_dict)
+
+    # Convert and validate data
+    X, Y = convert_to_tensors(X, Y)
+    P, N, M = validate_data_shapes(X, Y)
+
+    # Setup
+    N_edges = model.circuit.number_of_edges()
+    batches_per_epoch = P // cfg.batch_size
+    N_batches = cfg.N_batches if cfg.N_batches is not None else int(batches_per_epoch * cfg.N_epochs)
+
+    # Resolve node indices
+    x_nodes, y_nodes = resolve_node_indices(cfg.x_nodes, cfg.y_nodes, model)
+    x_inds = utils.nodes_to_inds(x_nodes, model.circuit)
+    y_inds = utils.nodes_to_inds(y_nodes, model.circuit)
+
+    # The free/clamped partition of the free phase is fixed by x_nodes, so the
+    # adjoint system's geometry can be resolved once up front.
+    model.set_inputs(x_nodes)
+    Del_free = model.Del_dense[:, model.free_inds]              # (N_edges, N_free), dense even when use_sparse
+    N_free = Del_free.shape[1]
+    free_positions = {ind: k for k, ind in enumerate(model.free_inds)}
+    if not all(ind in free_positions for ind in y_inds):
+        raise ValueError("Output nodes must be free during the free phase; "
+                         f"y_nodes {y_nodes} are not all in model.free_nodes.")
+    y_free_inds = [free_positions[ind] for ind in y_inds]       # y node positions within V_free
+    eye = tc.eye(N_free, dtype=model.dtype, device=model.device)
+
+    # Initialize tracking arrays
+    param_history = initialize_param_history(model)
+    loss = np.zeros(N_batches)
+    accuracy = np.zeros(N_batches)
+
+    def adjoint_edge_response(V_edge_F, y, y_F):
+        """
+        Solve the linearized (adjoint) circuit and project back onto edges.
+
+        Returns A @ lambda with shape (batch, N_edges), the quantity that
+        contracts with d gamma / d theta to give the loss gradient.
+        """
+        N_batch = y.shape[0]
+
+        # differential conductance of every edge at the free-phase operating point.
+        # MaskedNonlinearity writes in place, so hand it a private copy.
+        gamma_prime = model.d_gamma_d_x(V_edge_F.detach().clone())      # (batch, N_edges)
+
+        # dL/dV_free for the configured loss, nonzero only on output nodes
+        dL_dV = tc.zeros((N_batch, N_free), dtype=model.dtype, device=model.device)
+        dL_dV[:, y_free_inds] = compute_loss_gradient(y, y_F.detach(), cfg)
+
+        chunk = cfg.solve_chunk_size if cfg.solve_chunk_size is not None else N_batch
+        responses = []
+        for start in range(0, N_batch, chunk):
+            g = gamma_prime[start:start + chunk]
+            # H = A^T diag(gamma') A, the adjoint circuit's conductance matrix
+            H = tc.einsum('ei,be,ej->bij', Del_free, g, Del_free) + cfg.reg * eye
+            try:
+                lam = tc.linalg.solve(H, dL_dV[start:start + chunk])
+            except tc._C._LinAlgError:
+                # saturated elements can leave H singular even after the ridge
+                lam = (tc.linalg.pinv(H) @ dL_dV[start:start + chunk, :, None])[..., 0]
+            responses.append(lam @ Del_free.t())
+        return tc.cat(responses, axis=0)
+
+    def compute_d_theta(u, V_F, layer):
+        d_gamma_d_theta = layer.d_gamma_d_theta(V_F)               # (batch, N_params, N_edges)
+        grad = tc.mean(u[:, None, :] * d_gamma_d_theta, axis=0)    # (N_params, N_edges)
+        return - layer.learning_rates * cfg.alpha * grad
+
+    update_step = get_parameter_updater(cfg)
+
+    compute_loss_function = loss_functions[cfg.loss]
+    compute_loss_gradient = get_loss_gradient(cfg)
+
+    # Training loop
+    for t in tqdm(range(N_batches)):
+        # Sample batch
+        batch_inds = random.sample(range(P), cfg.batch_size)
+        x = X[batch_inds]
+        y = Y[batch_inds]
+
+        # Ensure tensors are on correct device and dtype
+        x = x.to(dtype=model.dtype, device=model.device)
+        y = y.to(dtype=model.dtype, device=model.device)
+
+        # Compute free state
+        model.set_inputs(x_nodes)
+        V_node_F, _ = model(x)
+        y_F = V_node_F[:, y_inds]
+        V_edge_F = model.V_edge().detach()
+
+        # Solve the adjoint circuit once for the whole batch
+        u = adjoint_edge_response(V_edge_F, y, y_F)
+
+        # update parameters and history
+        for element_name, layer in model.element_layers.items():
+            edge_inds = model.element_to_inds[element_name]
+            V_F = V_edge_F[:, edge_inds]
+            u_element = u[:, edge_inds]
+
+            # apply parameter gradients
+            layer.theta.data += update_step(element_name, compute_d_theta(u_element, V_F, layer))
+            layer.clip_parameters()         # enforce limits on model parameter ranges
+
+            param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
+
+        # record performance on batch
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
         accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
         loss[t] = loss_batch.detach()
         accuracy[t] = accuracy_batch.detach()
@@ -601,6 +1045,9 @@ def TestClassificationAccuracy(X, Y, model, config=None, **params):
     # Set model to evaluation mode
     model.set_inputs(x_nodes)
 
+    # Get loss function
+    compute_loss_function = loss_functions[cfg.loss]
+
     # Process all batches
     for batch_idx in tqdm(range(N_batches), desc='Testing'):
         # Sample batch indices
@@ -624,7 +1071,7 @@ def TestClassificationAccuracy(X, Y, model, config=None, **params):
         y_free = V_node[:, y_inds]
 
         # Compute metrics
-        batch_loss = loss_function(y_tensor, y_free) / actual_batch_size
+        batch_loss = compute_loss_function(y_tensor, y_free, cfg) / actual_batch_size
         batch_accuracy = argmax_classification_accuracy(y_tensor, y_free) / actual_batch_size
 
         accuracy[batch_idx] = batch_accuracy.detach().cpu().numpy()
@@ -687,6 +1134,8 @@ def GeoCoupledLearning(X, Y, model, config=None, **params):
 
         return layer.learning_rates * cfg.alpha / cfg.eta * layer.theta * tc.mean(((V_F**2 - V_C**2) / V_F / V_C)[:,None], axis=0)
         
+    compute_loss_function = loss_functions[cfg.loss]
+
     # Training loop
     for t in tqdm(range(N_batches)):
         # Sample batch
@@ -728,7 +1177,7 @@ def GeoCoupledLearning(X, Y, model, config=None, **params):
             param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
-        loss_batch = loss_function(y, y_F) / cfg.batch_size
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
         accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
         loss[t] = loss_batch.detach()
         accuracy[t] = accuracy_batch.detach()
@@ -743,7 +1192,7 @@ def AdjointLearning(X, Y, model, config=None, **params):
         else:
             raise TypeError("config must be a AdjointTrainingConfig object")
     else:
-        param_dict = extract_training_params(**params)
+        param_dict = extract_training_params(config_cls=AdjointTrainingConfig, **params)
         cfg = AdjointTrainingConfig(**param_dict)
 
     # Convert and validate data
@@ -768,7 +1217,10 @@ def AdjointLearning(X, Y, model, config=None, **params):
     def compute_d_theta(V_F, V_C, layer):
         D_V = (V_F - V_C)[:,None]       # Note: V_edge has a negative sign in it, i.e. model.V_edge() 
         return layer.learning_rates * cfg.alpha / cfg.eta * tc.mean(D_V * V_F[:,None], axis=0)
-        
+
+    compute_loss_function = loss_functions[cfg.loss]
+    compute_clamped_state = clamping_functions[cfg.clamp_method]
+
     # Training loop
     for t in tqdm(range(N_batches)):
         # Sample batch
@@ -787,7 +1239,7 @@ def AdjointLearning(X, Y, model, config=None, **params):
         V_edge_F = model.V_edge() 
 
         # Compute clamped state
-        y_C = cfg.eta * y + (1 - cfg.eta) * y_F.detach()
+        y_C = compute_clamped_state(y, y_F.detach(), cfg)
 
         model.set_inputs(x_nodes, y_nodes)
         _ = model(x, y_C)
@@ -810,7 +1262,7 @@ def AdjointLearning(X, Y, model, config=None, **params):
             param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
-        loss_batch = loss_function(y, y_F) / cfg.batch_size
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
         accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
         loss[t] = loss_batch.detach()
         accuracy[t] = accuracy_batch.detach()
@@ -855,6 +1307,8 @@ def InvariantLearning(X, Y, model, config=None, **params):
         # return layer.learning_rates * cfg.alpha / cfg.eta * layer.theta * tc.mean(D_V / V_F[:,None], axis=0)
         # return layer.learning_rates * cfg.alpha / cfg.eta * layer.theta * tc.mean(D_V * V_F[:,None], axis=0)
         
+    compute_loss_function = loss_functions[cfg.loss]
+
     # Training loop
     for t in tqdm(range(N_batches)):
         # Sample batch
@@ -896,7 +1350,7 @@ def InvariantLearning(X, Y, model, config=None, **params):
             param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
-        loss_batch = loss_function(y, y_F) / cfg.batch_size
+        loss_batch = compute_loss_function(y, y_F, cfg) / cfg.batch_size
         accuracy_batch = argmax_classification_accuracy(y, y_F) / cfg.batch_size
         loss[t] = loss_batch.detach()
         accuracy[t] = accuracy_batch.detach()
@@ -935,6 +1389,8 @@ def NCCoupledLearning(X, Y, model, config=None, **params):
     param_history = initialize_param_history(model)
     loss = np.zeros(N_batches)
     accuracy = np.zeros(N_batches)
+
+    compute_loss_function = loss_functions[cfg.loss]
 
     # Training loop
     for t in tqdm(range(N_batches)):
@@ -1005,7 +1461,7 @@ def NCCoupledLearning(X, Y, model, config=None, **params):
             param_history[element_name].append(layer.theta.data.cpu().clone().detach().numpy())
 
         # record performance on batch
-        loss_batch = loss_function(y, y_f) / cfg.batch_size
+        loss_batch = compute_loss_function(y, y_f, cfg) / cfg.batch_size
         accuracy_batch = argmax_classification_accuracy(y, y_f) / cfg.batch_size
         loss[t] = loss_batch.detach()
         accuracy[t] = accuracy_batch.detach()

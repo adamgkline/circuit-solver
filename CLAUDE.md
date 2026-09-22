@@ -101,14 +101,66 @@ clamped states they compute (symmetric uses ±; noise-contrastive adds per-class
 negative states). `eta` = clamp/nudge strength, `alpha` = learning rate, and
 `layer.learning_rates` is a per-parameter multiplier.
 
+**`GradientDescent` is the exception to step 2** and the one deliberately
+non-local rule: it runs the free phase only and replaces the clamped phase with
+a linear solve for the exact `dL/dtheta`. Backprop through `model.forward` is
+not an option (the inner LBFGS/Adam relaxation steps `V_free` in place, outside
+the autograd graph), so it differentiates the equilibrium implicitly — the
+adjoint method. With `A = Del_free` (dense, taken from `Del_dense[:, free_inds]`
+so it works under `use_sparse`) and `gamma'` from `model.d_gamma_d_x`:
+
+    H = A^T diag(gamma') A          # Hessian of the physical objective in V_free,
+                                    # i.e. the linearized circuit's conductance matrix
+    H lambda = dL/dV_free           # loss_gradients[cfg.loss], injected at the
+                                    # output nodes; 2 (y_F - y) for MSE
+    dL/dtheta[p,e] = (A lambda)[e] * layer.d_gamma_d_theta[...][p,e]
+
+`GDTrainingConfig` adds `reg` (ridge on `H`; raise it when elements saturate to
+zero differential conductance and `H` goes singular) and `solve_chunk_size`
+(the system is `(batch, N_free, N_free)`, so chunk the batch on large circuits —
+chunking is exactly equivalent, verified). The gradient is exact *at the
+equilibrium*, so its accuracy is capped by the free-phase solve; the default
+`N_optim_steps=3` leaves a residual current on free nodes that shows up as
+gradient error. Validated against central finite differences on a Newton-refined
+equilibrium (two layers, hidden free nodes, mixed `Resistor`/`Diode` edges):
+~1e-9 relative. Note `MaskedNonlinearity` mutates its input in place, which is
+why `d_gamma_d_x` is handed a clone.
+
+`extract_training_params` takes an optional `config_cls`; pass it to accept that
+dataclass's own fields instead of the fixed default whitelist (that's how
+`reg`/`solve_chunk_size` can arrive as kwargs).
+
 **Parameter update methods**: `cfg.parameter_update_method` selects how the raw
 `compute_d_theta` step is applied — `None`/`'sgd'` adds it directly, `'adam'`
 preconditions it with a stateful `AdamUpdater` (per-layer moment tensors shaped
 like `theta`; step size set by `cfg.adam_config.lr`, since Adam normalizes away
 `alpha`). Wired into the three core rules (`CoupledLearning`,
-`CoupledLearningEtaZero`, `SymmetricCoupledLearning`) only. The functions below
+`CoupledLearningEtaZero`, `SymmetricCoupledLearning`) and `GradientDescent`. The functions below
 the "Experimental learning rule training functions" header are the author's
 scratch space — leave them alone unless explicitly asked to change them.
+
+**Loss selection**: `cfg.loss` keys into `loss_functions` (`'MSE'`, `'hinge'`)
+and `cfg.clamp_method` keys into `clamping_functions`. Both live on
+`BaseTrainingConfig`, so every rule has them. All loss functions take
+`(y, y_free, cfg)`.
+
+How `loss` is used depends on the rule. For the **coupled-learning family** it
+only affects what gets *logged* — `clamp_method` is what drives learning — so a
+hinge run there normally sets **both**. For **`GradientDescent`** `loss` drives
+the update itself: it picks `dL/dy_free` out of `loss_gradients` and injects it
+into the adjoint solve, and `clamp_method` is irrelevant (there is no clamped
+phase). A loss usable by `GradientDescent` therefore needs an entry in
+**both** `loss_functions` and `loss_gradients`; `get_loss_gradient` raises a
+pointed `ValueError` when it is missing.
+
+The hinge pair (`hinge_loss`, `hinge_clamping`, sharing `hinge_margin_mask`)
+acts only on outputs with `y * y_free < cfg.kappa`, and leaves the rest at
+`y_F` so they contribute nothing to the update. This assumes **signed targets**:
+`y*y_free` is only a margin if the two classes are encoded as `y < 0` / `y > 0`.
+With one-hot `{0, g}` targets the non-target entries give `y*y_free == 0`, so
+they are either never clamped (`kappa <= 0`) or always clamped (`kappa > 0`) —
+map labels to `±g` before using the hinge. As a sanity check, `kappa -> inf`
+makes the hinge path reduce bit-identically to MSE.
 
 `history[element_name]` is the parameter trajectory with shape
 `(N_params, N_batches+1, N_edges)` (note: **param, time, edge** — see
@@ -120,8 +172,11 @@ scratch space — leave them alone unless explicitly asked to change them.
   never imported (should be `nx.coloring.greedy_color`); also reads
   `circuit.graph` / `circuit.inputs` / `circuit.outputs` attributes that
   `Circuit` doesn't set. Will `NameError`/`AttributeError`.
-- `learning.hinge_clamping`, `learning.constant_clamping`,
-  `learning.distance_classification_accuracy` — empty stubs (return `None`).
+- `learning.constant_clamping`, `learning.distance_classification_accuracy`
+  — empty stubs (return `None`).
+- `learning.InvariantLearning` — runs, but its parameter update goes `NaN`
+  within the first couple of batches on a plain resistor network. The loss
+  dispatch is fine; the rule itself needs a look.
 
 These are annotated inline with `# TODO`/`# BUG`. If asked to work on
 layer-graph or hinge loss, these are the starting points.

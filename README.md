@@ -120,6 +120,22 @@ V_node, _ = model(x, y)
 `(X, Y, model, config)` signature. `TestClassificationAccuracy` evaluates a
 trained model.
 
+`GradientDescent` is the non-local reference baseline: it computes the *exact*
+`dL/dtheta` of the free-phase MSE loss and steps against it, so you can measure
+how much a local rule gives up. It runs only the free phase — the clamped phase
+is replaced by one linear "adjoint circuit" solve (implicit differentiation of
+the equilibrium; backprop through the solver is not available, since the inner
+relaxation updates voltages outside the autograd graph). Configure it with
+`GDTrainingConfig(alpha=..., reg=..., solve_chunk_size=...)`; `reg` regularizes
+the adjoint solve when elements saturate to zero differential conductance, and
+`solve_chunk_size` bounds the `(batch, N_free, N_free)` memory on large
+circuits.
+
+```python
+from circuit_solver.learning import GradientDescent, GDTrainingConfig
+history = GradientDescent(X, Y, model, GDTrainingConfig(batch_size=50, N_batches=1000, alpha=0.5))
+```
+
 ## Status / caveats
 
 Research code under active development. Some experimental branches are

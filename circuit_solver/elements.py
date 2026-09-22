@@ -94,6 +94,13 @@ def rho_ideal_diode_sym(x, theta):
 def rho_adj_ideal_diode(x, theta):
     return rho_ideal_diode(x - theta[1], theta[0][None,...])
 
+def rho_tanh(x, theta):
+    """simulates Somnath's edges"""
+    return 4 * theta[0] * tc.log(tc.cosh(x / 2))
+
+def rho_tanh_diode(x, theta):
+    return 4 * theta[0] * tc.log(tc.cosh(tc.relu(x) / 2))
+
 
 
 # Reverse-direction components
@@ -144,6 +151,9 @@ IdealDiode = element_generator(rho_ideal_diode, N_params=1, name='IdealDiode',ty
 
 AdjIdealDiode = element_generator(rho_adj_ideal_diode, N_params=2, name='AdjIdealDiode', type='AdjIdealDiode', param_ranges=[(1E-1,1E1),(-1,1)], learning_rates=(1,1)) # [conductance, offset]
 
+TanhDiode = element_generator(rho_tanh_diode, N_params=1, name='TanhDiode',type='TanhDiode', param_ranges=[(1E-1, 1E1)], learning_rates=(1,))  # [conductance]
+
+
 CubicDiode = element_generator(rho_cubic_diode, N_params=1, name='CubicDiode', type='CubicDiode', param_ranges=[(0,1E2)], learning_rates=(1,))
 
 
@@ -157,6 +167,7 @@ Resistor = element_generator(rho_linear, N_params=1, name='Resistor', type='Resi
 
 Cubic = element_generator(rho_cubic, N_params=2, name='Cubic', type='Cubic', param_ranges=[(0,1E2),(0,1E2)], learning_rates=(1,1))
 
+Tanh = element_generator(rho_tanh, N_params=1, name='Tanh', type='Tanh', param_ranges=[(0,1E2)], learning_rates=(1,))
 
 
 # def ResistorConfig():
